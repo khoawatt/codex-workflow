@@ -1,0 +1,161 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+SESSION="${CODEX_WORK_SESSION:-codex-work}"
+CONFIG_FILE="${CODEX_WORK_CONFIG:-$HOME/.config/codex-work/projects.conf}"
+
+die() {
+    printf 'codex-work: %s\n' "$*" >&2
+    exit 1
+}
+
+usage() {
+    cat <<'EOF'
+Usage: codex-work [--reset|--status|--help]
+
+  no argument  Create the configured tmux workspace, or attach to it.
+  --reset      Recreate only the codex-work tmux session.
+  --status     Show configured projects and current session state.
+  --help       Show this help.
+
+Environment:
+  CODEX_WORK_CONFIG   Override the project config path.
+  CODEX_WORK_SESSION  Override the tmux session name.
+EOF
+}
+
+expand_path() {
+    local value="$1"
+    case "$value" in
+        '~') printf '%s\n' "$HOME" ;;
+        '~/'*) printf '%s/%s\n' "$HOME" "${value:2}" ;;
+        /*) printf '%s\n' "$value" ;;
+        *) die "Checkout path must be absolute or start with ~/: $value" ;;
+    esac
+}
+
+load_projects() {
+    [[ -r "$CONFIG_FILE" ]] || die "Config not found: $CONFIG_FILE. Run the repository install.sh first."
+
+    PROJECT_NAMES=()
+    PROJECT_URLS=()
+    PROJECT_PATHS=()
+
+    local line_number=0 name url checkout_path extra expanded_path
+    while IFS='|' read -r name url checkout_path extra || [[ -n "${name}${url}${checkout_path}${extra}" ]]; do
+        line_number=$((line_number + 1))
+        [[ -z "${name//[[:space:]]/}" || "$name" == \#* ]] && continue
+
+        [[ -n "$name" && -n "$url" && -n "$checkout_path" && -z "${extra:-}" ]] ||
+            die "Invalid config at $CONFIG_FILE:$line_number (expected name|git_url|checkout_path)."
+        [[ "$name" =~ ^[A-Za-z0-9._-]+$ ]] ||
+            die "Invalid project name '$name' at $CONFIG_FILE:$line_number."
+
+        expanded_path="$(expand_path "$checkout_path")"
+        PROJECT_NAMES+=("$name")
+        PROJECT_URLS+=("$url")
+        PROJECT_PATHS+=("$expanded_path")
+    done < "$CONFIG_FILE"
+
+    ((${#PROJECT_NAMES[@]} > 0)) || die "No projects configured in $CONFIG_FILE."
+}
+
+require_runtime() {
+    command -v tmux >/dev/null 2>&1 || die "tmux is not installed. See docs/SETUP.md."
+    command -v codex >/dev/null 2>&1 || die "Codex CLI is not installed or not in PATH. See docs/SETUP.md."
+
+    local index
+    for index in "${!PROJECT_PATHS[@]}"; do
+        [[ -d "${PROJECT_PATHS[$index]}" ]] ||
+            die "Project '${PROJECT_NAMES[$index]}' is missing: ${PROJECT_PATHS[$index]}. Run install.sh or clone it."
+    done
+}
+
+attach_workspace() {
+    if [[ -n "${TMUX:-}" ]]; then
+        exec tmux switch-client -t "$SESSION"
+    fi
+    exec tmux attach-session -t "$SESSION"
+}
+
+session_is_valid() {
+    local actual_paths expected_path pane_count
+    pane_count="$(tmux list-panes -t "$SESSION" -F '#{pane_id}' 2>/dev/null | wc -l | tr -d ' ')"
+    [[ "$pane_count" -eq "${#PROJECT_PATHS[@]}" ]] || return 1
+
+    actual_paths="$(tmux list-panes -t "$SESSION" -F '#{pane_current_path}' 2>/dev/null)"
+    for expected_path in "${PROJECT_PATHS[@]}"; do
+        grep -Fxq "$expected_path" <<< "$actual_paths" || return 1
+    done
+}
+
+show_status() {
+    printf 'Config: %s\nSession: %s\nProjects:\n' "$CONFIG_FILE" "$SESSION"
+    local index
+    for index in "${!PROJECT_NAMES[@]}"; do
+        printf '  - %s -> %s\n' "${PROJECT_NAMES[$index]}" "${PROJECT_PATHS[$index]}"
+    done
+
+    if command -v tmux >/dev/null 2>&1 && tmux has-session -t "$SESSION" 2>/dev/null; then
+        printf 'State: running\n'
+        tmux list-panes -t "$SESSION" -F '  #{pane_index}: #{pane_current_path} (#{pane_current_command})'
+    else
+        printf 'State: stopped\n'
+    fi
+}
+
+[[ $# -le 1 ]] || die "Too many arguments. Use --help."
+case "${1:-}" in
+    ''|--reset|--status) ;;
+    --help) usage; exit 0 ;;
+    *) die "Unknown option: $1. Use --help." ;;
+esac
+
+load_projects
+
+if [[ "${1:-}" == "--status" ]]; then
+    show_status
+    exit 0
+fi
+
+require_runtime
+
+if [[ "${1:-}" == "--reset" ]] && tmux has-session -t "$SESSION" 2>/dev/null; then
+    tmux kill-session -t "$SESSION"
+fi
+
+if tmux has-session -t "$SESSION" 2>/dev/null; then
+    session_is_valid || die "Session '$SESSION' does not match the config. Run codex-work --reset."
+    attach_workspace
+fi
+
+cleanup_failed_create() {
+    local exit_code=$?
+    trap - ERR
+    tmux kill-session -t "$SESSION" 2>/dev/null || true
+    exit "$exit_code"
+}
+trap cleanup_failed_create ERR
+
+CODEX_BIN="$(command -v codex)"
+printf -v CODEX_COMMAND 'exec %q' "$CODEX_BIN"
+
+FIRST_PANE="$(
+    tmux new-session -d -s "$SESSION" -c "${PROJECT_PATHS[0]}" \
+        -P -F '#{pane_id}' "$CODEX_COMMAND"
+)"
+tmux select-pane -t "$FIRST_PANE" -T "${PROJECT_NAMES[0]}"
+
+for ((index = 1; index < ${#PROJECT_NAMES[@]}; index++)); do
+    pane_id="$(
+        tmux split-window -d -t "$SESSION" -c "${PROJECT_PATHS[$index]}" \
+            -P -F '#{pane_id}' "$CODEX_COMMAND"
+    )"
+    tmux select-pane -t "$pane_id" -T "${PROJECT_NAMES[$index]}"
+done
+
+tmux select-layout -t "$SESSION" tiled >/dev/null
+tmux select-pane -t "$FIRST_PANE"
+
+trap - ERR
+attach_workspace
