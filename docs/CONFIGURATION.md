@@ -25,8 +25,8 @@ Quy tắc:
 - `git_url` dùng khi `install.sh` clone project còn thiếu;
 - `checkout_path` phải là đường dẫn tuyệt đối hoặc bắt đầu bằng `~/`;
 - dòng trống và dòng bắt đầu bằng `#` được bỏ qua;
-- thứ tự dòng là thứ tự pane; launcher dùng layout `tiled` nên hỗ trợ từ một
-  project trở lên.
+- thứ tự dòng là thứ tự pane; đúng hai project được chia trái/phải 50–50 bằng
+  layout `even-horizontal`, còn số lượng khác dùng `tiled`.
 
 Sau khi sửa config:
 

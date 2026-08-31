@@ -1,0 +1,7 @@
+{
+  "mode": "single",
+  "max_chars": 120000,
+  "max_turns": 20,
+  "max_age_hours": 48,
+  "project_mode": {}
+}

@@ -154,7 +154,11 @@ for ((index = 1; index < ${#PROJECT_NAMES[@]}; index++)); do
     tmux select-pane -t "$pane_id" -T "${PROJECT_NAMES[$index]}"
 done
 
-tmux select-layout -t "$SESSION" tiled >/dev/null
+if ((${#PROJECT_NAMES[@]} == 2)); then
+    tmux select-layout -t "$SESSION" even-horizontal >/dev/null
+else
+    tmux select-layout -t "$SESSION" tiled >/dev/null
+fi
 tmux select-pane -t "$FIRST_PANE"
 
 trap - ERR

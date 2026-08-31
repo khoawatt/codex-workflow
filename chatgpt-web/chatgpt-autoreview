@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+STATE_DIR="${CODEX_WORK_CHATGPT_DIR:-$HOME/.config/codex-work/chatgpt-web}"
+STATE_FILE="$STATE_DIR/autoreview.json"
+
+usage() {
+    printf 'Usage: chatgpt-autoreview <on|off|status>\n' >&2
+}
+
+read_state() {
+    [[ -r "$STATE_FILE" ]] && grep -Eq '"enabled"[[:space:]]*:[[:space:]]*true' "$STATE_FILE"
+}
+
+write_state() {
+    local enabled="$1" temp
+    install -d -m 0700 "$STATE_DIR"
+    temp="$(mktemp "$STATE_DIR/autoreview.XXXXXX")"
+    chmod 0600 "$temp"
+    printf '{"enabled":%s}\n' "$enabled" > "$temp"
+    mv -f -- "$temp" "$STATE_FILE"
+}
+
+[[ $# -eq 1 ]] || { usage; exit 2; }
+case "$1" in
+    on)
+        write_state true
+        printf 'auto-review: ON (Codex sessions using the installed workflow block will review implementation results)\n'
+        ;;
+    off)
+        write_state false
+        printf 'auto-review: OFF (manual final review only)\n'
+        ;;
+    status)
+        if read_state; then printf 'auto-review: ON\n'; else printf 'auto-review: OFF\n'; fi
+        ;;
+    *) usage; exit 2 ;;
+esac

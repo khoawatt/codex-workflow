@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+BRIDGE_DIR="${CODEX_WORK_GEMINI_DIR:-$HOME/.config/codex-work/gemini-web}"
+export CODEX_WORK_GEMINI_DIR="$BRIDGE_DIR"
+[[ -d "$BRIDGE_DIR/libs" ]] && export LD_LIBRARY_PATH="$BRIDGE_DIR/libs${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+# Reuse ChatGPT bridge libs if Gemini bridge hasn't extracted yet (shared Chromium libs)
+CHATGPT_LIBS="${CODEX_WORK_CHATGPT_DIR:-$HOME/.config/codex-work/chatgpt-web}/libs"
+if [[ -d "$CHATGPT_LIBS" ]]; then
+  export LD_LIBRARY_PATH="$CHATGPT_LIBS${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+fi
+exec node "$BRIDGE_DIR/gemini-consult.mjs" "$@"

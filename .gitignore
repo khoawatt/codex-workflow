@@ -3,3 +3,5 @@
 .env
 .env.*
 !.env.example
+chatgpt-web/node_modules/
+gemini-web/node_modules/

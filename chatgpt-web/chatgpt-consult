@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+BRIDGE_DIR="${CODEX_WORK_CHATGPT_DIR:-$HOME/.config/codex-work/chatgpt-web}"
+# Reuse user-space libs extracted by either bridge (no sudo fallback)
+if [[ -d "$BRIDGE_DIR/libs" ]]; then
+  export LD_LIBRARY_PATH="$BRIDGE_DIR/libs${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+fi
+# Also reuse libs from the sibling bridge if present (mirrors opencode-workflow sharing)
+GEMINI_LIBS="${CODEX_WORK_GEMINI_DIR:-$HOME/.config/codex-work/gemini-web}/libs"
+if [[ -d "$GEMINI_LIBS" ]]; then
+  export LD_LIBRARY_PATH="$GEMINI_LIBS${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+fi
+exec node "$BRIDGE_DIR/chatgpt-consult.mjs" "$@"

@@ -20,11 +20,20 @@ configured project. When asked to set it up, read `README.md` and all files in
 ## Verification checklist
 
 ```bash
-bash -n bin/codex-work install.sh
+bash -n bin/codex-work install.sh install-project.sh install-chatgpt-web.sh install-gemini-web.sh \
+  chatgpt-web/chatgpt-consult chatgpt-web/chatgpt-autoreview gemini-web/gemini-consult \
+  templates/merge-approved-pr.sh
+node --check chatgpt-web/chatgpt-consult.mjs gemini-web/gemini-consult.mjs gemini-web/session-auth.mjs
 bash tests/test.sh
 command -v codex-work
 codex-work --status
+chatgpt-consult status          # {"profileExists":true,"loggedIn":true}
+chatgpt-consult project list    # projects (may be empty on fresh account)
+gemini-consult status           # {"profileExists":true,"loggedIn":true} (if set up)
+tmux list-panes -t codex-work -F '#{pane_index}|#{pane_current_path}|#{pane_current_command}|#{pane_active}'
 ```
+
+If `chatgpt-consult status` shows `loggedIn:false`, run `chatgpt-consult login` and sign in in the browser window, then re-check. To switch ChatGPT account, run `chatgpt-consult login --switch` (keeps browser open, waits for token change; use `--wait=SECONDS` to keep open after new login for verification). For Gemini, `gemini-consult login` then `gemini-consult status`.
 
 After the owner starts the workspace, verify without exposing pane contents:
 
@@ -32,4 +41,4 @@ After the owner starts the workspace, verify without exposing pane contents:
 tmux list-panes -t codex-work -F '#{pane_index}|#{pane_current_path}|#{pane_current_command}|#{pane_active}'
 ```
 
-Expected: one pane per non-comment config entry and the exact configured paths.
+Expected: one pane per non-comment config entry and the exact configured paths. Exactly two projects → `even-horizontal` 50-50; otherwise `tiled`.

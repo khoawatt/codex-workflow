@@ -1,0 +1,10 @@
+{
+  "name": "codex-work-chatgpt-web",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Local Playwright bridge for Codex consultations through ChatGPT Web",
+  "dependencies": {
+    "playwright": "1.62.1"
+  }
+}
