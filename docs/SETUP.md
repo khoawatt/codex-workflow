@@ -32,7 +32,7 @@ Không copy token, thư mục auth hoặc state Codex từ máy cũ vào repo n�
 ```bash
 mkdir -p ~/projects/personal
 cd ~/projects/personal
-git clone https://github.com/Akbi47/codex-workflow.git
+git clone https://github.com/khoawatt/codex-workflow.git
 cd codex-workflow
 bash install.sh
 ```
