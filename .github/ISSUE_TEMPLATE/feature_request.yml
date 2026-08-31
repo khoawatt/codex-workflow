@@ -1,0 +1,11 @@
+name: Feature Request
+description: Suggest an idea or enhancement for codex-workflow
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: feature-description
+    attributes:
+      label: Proposed Feature
+      description: Describe the feature or improvement you'd like to see.
+    validations:
+      required: true

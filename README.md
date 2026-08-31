@@ -16,7 +16,7 @@ tham gia approval hoặc workflow.
 Yêu cầu: Linux/WSL, Bash, Git, tmux và Codex CLI đã đăng nhập.
 
 ```bash
-git clone https://github.com/Akbi47/codex-workflow.git
+git clone https://github.com/khoawatt/codex-workflow.git
 cd codex-workflow
 bash install.sh
 codex-work
@@ -104,3 +104,22 @@ Bridge ChatGPT Web không dùng API key và không in cookie. Nó điều khiể
 Chromium riêng đã đăng nhập; chỉ gửi nội dung prompt mà Codex chuẩn bị. Không dùng
 bridge cho secret, `.env`, auth state, raw diff, transcript đầy đủ hay pane tmux.
 Approval ChatGPT chỉ là bằng chứng review cho đúng SHA/PR, không phải quyền merge.
+
+---
+
+## Đóng góp (Contributing)
+
+Mọi đóng góp đều được hoan nghênh. Vui lòng xem [CONTRIBUTING.md](CONTRIBUTING.md) và [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) trước khi tạo pull request.
+
+---
+
+## Tác giả & Contributors
+
+* **Quách Võ Anh Khoa** ([@khoawatt](https://github.com/khoawatt)) — Author & Maintainer
+* **Audition MLD** ([@audition-mld](https://github.com/audition-mld)) — Contributor
+
+---
+
+## Giấy phép (License)
+
+Dự án được phân phối dưới giấy phép **MIT License**. Xem chi tiết tại [LICENSE](LICENSE).

@@ -1,0 +1,26 @@
+name: Bug Report
+description: Create a report to help us improve codex-workflow
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: Thanks for taking the time to report a bug in codex-workflow!
+  - type: input
+    id: os
+    attributes:
+      label: Operating System / Environment
+      description: What OS and distribution are you running? (e.g. Ubuntu 24.04, WSL2)
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: Describe what you observed vs what you expected.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant Log Output or Error Traces
+      render: shell

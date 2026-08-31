@@ -1,0 +1,24 @@
+{
+  "name": "codex-workflow",
+  "version": "1.0.0",
+  "description": "Portable tmux launcher and onboarding docs for running Codex across multiple projects with ChatGPT and Gemini web bridges",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/khoawatt/codex-workflow.git"
+  },
+  "keywords": [
+    "codex",
+    "tmux",
+    "chatgpt",
+    "gemini",
+    "ai-agent",
+    "workflow",
+    "playwright"
+  ],
+  "author": "Quách Võ Anh Khoa <khoawatt>",
+  "license": "MIT",
+  "type": "commonjs",
+  "scripts": {
+    "test": "bash tests/test.sh"
+  }
+}
