@@ -7,9 +7,10 @@ import { homedir } from 'node:os'
 import { basename, join } from 'node:path'
 import { execFileSync } from 'node:child_process'
 import { advanceLoginStability, classifyGeminiSession } from './session-auth.mjs'
+import { loadBridgeCreds, credsHelp, maskEmail, resolveBridgeDir, GEMINI_KEYS } from './bridge-env.mjs'
 
 const home = homedir()
-const bridgeDir = process.env.CODEX_WORK_GEMINI_DIR || join(home, '.config', 'codex-work', 'gemini-web')
+const bridgeDir = resolveBridgeDir(process.env.CODEX_WORK_GEMINI_DIR || process.env.GEMINI_BRIDGE_DIR || join(home, '.config', 'codex-work', 'gemini-web'), 'CODEX_WORK_GEMINI_DIR')
 const profileDir = join(bridgeDir, 'profile')
 const librariesDir = join(bridgeDir, 'libs')
 const chatsFile = join(bridgeDir, 'chats.json')
@@ -62,7 +63,9 @@ const accountIdentitySelectors = [
 
 function usage() {
   process.stderr.write('Usage: gemini-consult <login|status|ask|reset> [options]\n\n')
-  process.stderr.write('ask options: --new --headless --timeout=SECONDS --file=PATH\n')
+  process.stderr.write('  gemini-consult login [--auto]  Sign in automatically from .env (or manually once)\n')
+  process.stderr.write('ask options: --new --headless --timeout=SECONDS --file=PATH --no-auto-login\n')
+  process.stderr.write('\nENV FILE (~/.config/codex-work/gemini-web/.env, mode 600): GEMINI_EMAIL / GEMINI_PASSWORD (aliases GOOGLE_*)\n')
 }
 
 function sleep(ms) { return new Promise((resolve) => setTimeout(resolve, ms)) }
@@ -188,6 +191,163 @@ async function signedIn(page) {
   return (await sessionState(page)).loggedIn
 }
 
+function loadGeminiCreds() {
+  const envFileVar = (process.env.CODEX_WORK_GEMINI_ENV_FILE || '').trim() ? 'CODEX_WORK_GEMINI_ENV_FILE' : 'GEMINI_ENV_FILE'
+  return loadBridgeCreds({ bridgeDir, envFileVar, emailKeys: GEMINI_KEYS.emailKeys, passwordKeys: GEMINI_KEYS.passwordKeys })
+}
+
+async function hasRealBox(el) {
+  try { const box = await el.boundingBox(); return !!box && box.width >= 2 && box.height >= 2 } catch { return false }
+}
+async function fillFirstVisible(page, selectors, value, timeoutMs = 8000) {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    for (const sel of selectors) {
+      try {
+        const loc = page.locator(sel)
+        const n = await loc.count()
+        for (let i = 0; i < n; i++) {
+          const el = loc.nth(i)
+          try {
+            if (!(await hasRealBox(el))) continue
+            if (!(await el.isVisible().catch(()=>false))) continue
+            await el.click({timeout:2000}).catch(()=>{})
+            await el.fill(value, {timeout:5000})
+            return sel
+          } catch {}
+        }
+      } catch {}
+    }
+    await new Promise(r=>setTimeout(r,500))
+  }
+  return null
+}
+async function clickFirstVisible(page, selectors, timeoutMs = 8000) {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    for (const sel of selectors) {
+      try {
+        const loc = page.locator(sel)
+        const n = await loc.count()
+        for (let i = 0; i < n; i++) {
+          const el = loc.nth(i)
+          try {
+            if (!(await hasRealBox(el))) continue
+            if (!(await el.isVisible().catch(()=>false))) continue
+            await el.click({timeout:3000})
+            return sel
+          } catch {}
+        }
+      } catch {}
+    }
+    await new Promise(r=>setTimeout(r,500))
+  }
+  return null
+}
+async function pageBodyText(page) {
+  try { return String(await page.evaluate(()=>document.body?document.body.innerText.slice(0,4000):'')).toLowerCase() } catch { return '' }
+}
+function detectGoogleBlocker(bodyText, url) {
+  if (!bodyText && !url) return null
+  const tt = bodyText || ''
+  if (/this browser or app may not be secure|browser.*not.*secure|couldn'?t sign you in.*browser/.test(tt)) {
+    return 'Google chặn trình duyệt tự động ("browser may not be secure") — đăng nhập thủ công 1 lần (`login`) để lưu session, các lần sau tái dùng.'
+  }
+  if (/wrong password|incorrect.*password|wrong.*credentials/.test(tt)) {
+    return 'Google báo sai password — kiểm tra lại GEMINI_PASSWORD trong .env.'
+  }
+  if (/couldn'?t find your google account|couldn'?t find.*account|enter a valid email/.test(tt)) {
+    return 'Google không tìm thấy tài khoản — kiểm tra lại GEMINI_EMAIL trong .env.'
+  }
+  if (/2-step|2 step|two-?factor|verification code|verify it'?s you|check your phone|authenticator|we sent.*code|enter.*code/.test(tt)) {
+    return 'Tài khoản bật xác minh 2 bước / mã OTP — auto-login không thể tự qua. Đăng nhập thủ công 1 lần (`login`), session sẽ được tái dùng.'
+  }
+  if (/captcha|unusual traffic|verify you are human|suspicious activity|try again later|too many/.test(tt)) {
+    return 'Google yêu cầu xác minh người thật / giới hạn thử lại — hoàn thành 1 lần bằng `login` thủ công.'
+  }
+  return null
+}
+const GOOGLE_EMAIL_INPUT = ['#identifierId','input[name="identifier"]','input[type="email"]','input[autocomplete="username"]','input[type="text"][name="identifier"]']
+const GOOGLE_EMAIL_NEXT = ['#identifierNext','button:has-text("Next")','button[type="button"]:has-text("Next")']
+const GOOGLE_PASSWORD_INPUT = ['input[name="Passwd"]','input[type="password"]','#password input','input[autocomplete="current-password"]']
+const GOOGLE_PASSWORD_NEXT = ['#passwordNext','button:has-text("Next")','button[type="button"]:has-text("Next")']
+const GEMINI_APP_URL = 'https://gemini.google.com/app'
+
+async function tryAutoLoginGoogle(page, creds, { timeoutSec = 120 } = {}) {
+  const isLoggedIn = async () => (await sessionState(page)).loggedIn
+  if (await isLoggedIn()) return true
+  process.stderr.write(`[bridge] auto-login as ${maskEmail(creds.email)} (from ${creds.emailSource==='env'?'env':creds.envPath})…\n`)
+  await page.goto(GEMINI_APP_URL, { waitUntil: 'domcontentloaded', timeout: 60000 })
+  await new Promise(r=>setTimeout(r,2500))
+  const deadline = Date.now() + timeoutSec*1000
+  let emailDone = false, passwordDone = false, twoFactorNotified = false
+  const isTwoFactorBlocker = (msg) => /2 bước|2-step|two-factor|OTP|mã OTP|xác minh 2/i.test(msg||'')
+  const noteTwoFactor = () => { if(!twoFactorNotified){ process.stderr.write('[bridge] 2FA/OTP — hoàn tất xác minh trên điện thoại/trình duyệt, đang chờ hết timeout...\n'); twoFactorNotified=true } }
+  for(let i=0;i<5;i++){ if(await isLoggedIn()) return true; if(page.url().includes('accounts.google.com')) break; await new Promise(r=>setTimeout(r,1000)) }
+  while(Date.now() < deadline) {
+    if(await isLoggedIn()) return true
+    const url = page.url()
+    const onGoogleAuth = url.includes('accounts.google.com')
+    if(!onGoogleAuth && url.includes('gemini.google.com')) {
+      const st = await sessionState(page).catch(()=>null)
+      if(st && st.loggedIn) return true
+      const body = await pageBodyText(page)
+      const blocker = detectGoogleBlocker(body, url)
+      if(blocker && (emailDone||passwordDone)){ if(isTwoFactorBlocker(blocker)) noteTwoFactor(); else throw new Error(blocker) }
+      if(!emailDone && !passwordDone){
+        try{
+          const clicked = await page.evaluate(()=>{
+            const els=[...document.querySelectorAll('button, a')].filter(el=>{
+              const t=(el.innerText||'').trim()
+              if(!/^\s*sign in\s*$/i.test(t)) return false
+              const r=el.getBoundingClientRect()
+              return r.width>2 && r.height>2
+            })
+            if(!els.length) return false
+            els[0].click()
+            return true
+          })
+          if(clicked){ await new Promise(r=>setTimeout(r,4000)); continue }
+        }catch{}
+      }
+    }
+    const body = await pageBodyText(page)
+    const blocker = detectGoogleBlocker(body, url)
+    if(blocker && (emailDone||passwordDone)){ if(isTwoFactorBlocker(blocker)) noteTwoFactor(); else throw new Error(blocker) }
+    if(!emailDone && onGoogleAuth){
+      const hit = await fillFirstVisible(page, GOOGLE_EMAIL_INPUT, creds.email, 4000)
+      if(hit){ await clickFirstVisible(page, GOOGLE_EMAIL_NEXT, 5000); await new Promise(r=>setTimeout(r,3000)); emailDone=true; continue }
+    }
+    if(emailDone && !passwordDone && onGoogleAuth){
+      const hit = await fillFirstVisible(page, GOOGLE_PASSWORD_INPUT, creds.password, 5000)
+      if(hit){ passwordDone=true; await clickFirstVisible(page, GOOGLE_PASSWORD_NEXT, 5000); await new Promise(r=>setTimeout(r,3500)); continue }
+    }
+    if(emailDone && passwordDone){
+      for(let i=0;i<8;i++){
+        if(await isLoggedIn()) return true
+        const b2 = await pageBodyText(page)
+        const blocker2 = detectGoogleBlocker(b2, page.url())
+        if(blocker2){ if(isTwoFactorBlocker(blocker2)) { noteTwoFactor(); break } throw new Error(blocker2) }
+        await new Promise(r=>setTimeout(r,1500))
+      }
+    }
+    await new Promise(r=>setTimeout(r,1500))
+  }
+  const finalBlocker = detectGoogleBlocker(await pageBodyText(page), page.url())
+  throw new Error(finalBlocker || `Timed out after ${timeoutSec}s waiting for Google login as ${maskEmail(creds.email)}. Kiểm tra email/password trong .env hoặc đăng nhập thủ công 1 lần: gemini-consult login`)
+}
+
+async function ensureGeminiLoggedIn(page, { allowAuto = true } = {}) {
+  for(let i=0;i<6;i++){ if(await signedIn(page)) return true; await new Promise(r=>setTimeout(r,1000)) }
+  if(!allowAuto) return false
+  const creds = loadGeminiCreds()
+  for(const w of creds.warnings) process.stderr.write(`[bridge] WARN: ${w}\n`)
+  if(!creds.configured) return false
+  process.stderr.write(`[bridge] session hết hạn — tự đăng nhập lại từ .env (${maskEmail(creds.email)})…\n`)
+  try { await tryAutoLoginGoogle(page, creds); return await signedIn(page) } catch(e){ process.stderr.write(`[bridge] auto-login thất bại: ${e.message}\n`); return false }
+}
+
+
 function conversationId(url) {
   const match = url.match(/gemini\.google\.com\/app\/([^/?#]+)/i)
   return match ? match[1] : null
@@ -232,6 +392,34 @@ async function reply(page, timeoutSeconds, previousCount) {
 }
 
 async function login() {
+  const has = (flag) => commandArgs.includes(flag)
+  if (has('--auto') || has('--from-env') || has('--env')) {
+    const creds = loadGeminiCreds()
+    for (const w of creds.warnings) process.stderr.write(`[bridge] WARN: ${w}\n`)
+    if (!creds.configured) {
+      process.stderr.write(credsHelp({ bridgeLabel: 'Gemini/Google', envPath: creds.envPath, emailKeys: GEMINI_KEYS.emailKeys, passwordKeys: GEMINI_KEYS.passwordKeys }) + '\n')
+      process.exit(1)
+    }
+    const timeoutArg = commandArgs.find((a)=>a.startsWith('--timeout='))
+    const loginTimeout = timeoutArg ? Number.parseInt(timeoutArg.slice(10),10) || 120 : 120
+    const headless = has('--headless') ? true : false
+    const context = await launch(headless)
+    const page = context.pages()[0] || await context.newPage()
+    try {
+      await tryAutoLoginGoogle(page, creds, { timeoutSec: loginTimeout })
+      let ok=false
+      for(let i=0;i<10;i++){ if(await signedIn(page)){ ok=true; break } await new Promise(r=>setTimeout(r,1500)) }
+      if(!ok) throw new Error('login xong nhưng chưa thấy account identity — có thể cần consent/2FA thủ công.')
+      process.stderr.write('LOGIN OK — session saved (auto-login from .env).\n')
+      await context.close()
+      return
+    } catch(e){
+      process.stderr.write(`Auto-login thất bại: ${e.message}\n`)
+      process.stderr.write('Fallback: chạy `gemini-consult login` thủ công 1 lần để lưu session (2FA/CAPTCHA/"browser not secure" không tự qua được).\n')
+      try{ await context.close() }catch{}
+      process.exit(1)
+    }
+  }
   const context = await launch(false)
   try {
     const page = context.pages()[0] || await context.newPage()
@@ -272,8 +460,9 @@ async function login() {
 }
 
 async function status() {
+  const creds = loadGeminiCreds()
   if (!existsSync(profileDir)) {
-    process.stdout.write('{"profileExists":false,"loggedIn":false}\n'); return
+    process.stdout.write(`${JSON.stringify({ profileExists: false, loggedIn: false, envConfigured: creds.configured, envFileExists: creds.fileExists })}\n`); return
   }
   const context = await launch(true)
   try {
@@ -284,6 +473,8 @@ async function status() {
       profileExists: true,
       loggedIn: state.loggedIn,
       guestAvailable: state.guestAvailable,
+      envConfigured: creds.configured,
+      envFileExists: creds.fileExists,
     })}\n`)
   } finally { await context.close() }
 }
@@ -293,9 +484,11 @@ async function ask() {
   let timeoutSeconds = 300
   let headless = false
   let forceNew = false
+  let allowAutoLogin = true
   for (const option of commandArgs) {
     if (option === '--new') forceNew = true
     else if (option === '--headless') headless = true
+    else if (option === '--no-auto-login') allowAutoLogin = false
     else if (option.startsWith('--timeout=')) timeoutSeconds = Number.parseInt(option.slice(10), 10)
     else if (option.startsWith('--file=')) prompt = readFileSync(option.slice(7), 'utf8')
     else throw new Error(`unknown ask option: ${option}`)
@@ -316,7 +509,14 @@ async function ask() {
   try {
     const page = context.pages()[0] || await context.newPage()
     await page.goto(geminiUrl, { waitUntil: 'domcontentloaded', timeout: 60000 })
-    if (!(await signedIn(page))) throw new Error('Gemini Web is not signed in; run gemini-consult login first')
+    {
+      const loggedIn = await ensureGeminiLoggedIn(page, { allowAuto: allowAutoLogin })
+      if (!loggedIn) {
+        const creds = loadGeminiCreds()
+        const hint = creds.configured ? 'Auto-login từ .env thất bại — thử `login --auto` để xem chi tiết, hoặc `login` thủ công 1 lần.' : `Gemini Web is not signed in; run gemini-consult login first — hoặc cấu hình .env rồi chạy:  gemini-consult login --auto. File: ${creds.envPath}`
+        throw new Error(hint)
+      }
+    }
     const reused = current ? await openConversation(page, current.id) : false
     if (!reused) {
       current = null
@@ -354,7 +554,13 @@ async function reset() {
 
 async function main() {
   if (!['login', 'status', 'ask', 'reset'].includes(command)) { usage(); process.exitCode = 2; return }
-  if (commandArgs.length && command !== 'ask') throw new Error(`${command} does not accept options`)
+  if (command === 'login') {
+    const allowed = new Set(['--auto','--from-env','--env','--timeout=','--headless','--headful'])
+    for (const a of commandArgs) {
+      if (allowed.has(a) || a.startsWith('--timeout=') || a.startsWith('--headless') || a.startsWith('--headful')) continue
+      if (a === '--auto' || a === '--from-env' || a === '--env') continue
+    }
+  } else if (commandArgs.length && command !== 'ask') throw new Error(`${command} does not accept options`)
   await acquireLock()
   try {
     if (command === 'login') await login()

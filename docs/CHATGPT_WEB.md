@@ -11,19 +11,28 @@ Yêu cầu: Linux/WSL có Node.js, npm và display để mở Chromium.
 
 ```bash
 bash install-chatgpt-web.sh
-chatgpt-consult login
-chatgpt-consult status          # → {"profileExists":true,"loggedIn":true}
+# Pick ONE login style — manual (handles 2FA/CAPTCHA) or --auto from .env (no typing):
+chatgpt-consult login                    # đăng nhập thủ công 1 lần (xử lý được 2FA)
+# ...hoặc tự động từ .env (không gõ tay):
+# fill ~/.config/codex-work/chatgpt-web/.env (CHATGPT_EMAIL/CHATGPT_PASSWORD, chmod 600)
+chatgpt-consult login --auto
+chatgpt-consult status          # → {"profileExists":true,"loggedIn":true,"envConfigured":true}
 # Đổi tài khoản:
 chatgpt-consult login --switch              # giữ browser mở, đợi token đổi
 chatgpt-consult login --wait=30             # sau khi login mới, giữ mở 30s để verify
 ```
 
-LOGIN OPTIONS (mới port từ opencode-workflow):
+LOGIN OPTIONS:
 ```text
+--auto / --from-env / --env   Đăng nhập tự động từ .env (không gõ tay)
 --switch              Giữ browser mở để đổi account (đợi session token đổi; không tự đóng nếu đã login).
 --wait=SECONDS        Sau khi phát hiện login mới, giữ browser mở thêm SECONDS (default 0; implies --switch).
 --keep-open / --stay-open   Alias cho --switch.
+--timeout=SECONDS     Max seconds chờ auto-login (default 150)
+--headless / --headful       Browser visibility (default headful)
 ```
+
+`ask` tự retry `.env` login khi session hết hạn (unless `--no-auto-login`). Xem `docs/AUTO_LOGIN.md`.
 
 Installer thực hiện:
 

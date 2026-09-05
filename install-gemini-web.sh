@@ -104,6 +104,7 @@ install -d -m 0700 "$BRIDGE_DIR" "$BRIDGE_DIR/profile"
 install -d "$BIN_DIR"
 install -m 0755 "$SOURCE_DIR/gemini-consult" "$BIN_DIR/gemini-consult"
 install -m 0755 "$SOURCE_DIR/gemini-consult.mjs" "$BRIDGE_DIR/gemini-consult.mjs"
+install -m 0644 "$SOURCE_DIR/bridge-env.mjs" "$BRIDGE_DIR/bridge-env.mjs"
 install -m 0644 "$SOURCE_DIR/session-auth.mjs" "$BRIDGE_DIR/session-auth.mjs"
 install -m 0644 "$SOURCE_DIR/package.json" "$BRIDGE_DIR/package.json"
 install -m 0644 "$SOURCE_DIR/package-lock.json" "$BRIDGE_DIR/package-lock.json"
@@ -114,6 +115,15 @@ else
     install -m 0600 "$SOURCE_DIR/bridge-config.json" "$BRIDGE_DIR/bridge-config.json"
 fi
 
+if [[ ! -f "$BRIDGE_DIR/.env" ]]; then
+    printf '# Gemini auto-login (chmod 600, never commit)\n# See config/gemini-bridge.env.example for docs.\nGEMINI_EMAIL=\nGEMINI_PASSWORD=\n' > "$BRIDGE_DIR/.env"
+    chmod 0600 "$BRIDGE_DIR/.env" 2>/dev/null || true
+    printf 'Created %s/.env (fill GEMINI_EMAIL/GEMINI_PASSWORD, chmod 600) — or run manual login\n' "$BRIDGE_DIR"
+else
+    chmod 0600 "$BRIDGE_DIR/.env" 2>/dev/null || true
+    printf 'Kept existing %s/.env\n' "$BRIDGE_DIR"
+fi
+
 if [[ "${CODEX_WORK_SKIP_NPM_INSTALL:-0}" != 1 ]]; then
     command -v npm >/dev/null 2>&1 || { printf 'install-gemini-web.sh: npm is required.\n' >&2; exit 1; }
     npm ci --omit=dev --no-audit --no-fund --prefix "$BRIDGE_DIR"
@@ -122,4 +132,5 @@ if [[ "${CODEX_WORK_SKIP_NPM_INSTALL:-0}" != 1 ]]; then
 fi
 
 printf 'Installed Gemini scraper: %s/gemini-consult\n' "$BIN_DIR"
-printf 'Next: gemini-consult login, then gemini-consult status.\n'
+printf 'Next: gemini-consult login (--auto from .env) or gemini-consult login --auto; then gemini-consult status.\n'
+printf '  Manual: gemini-consult login   | Auto: fill %s/.env (GEMINI_EMAIL/PASSWORD) then gemini-consult login --auto\n' "$BRIDGE_DIR"

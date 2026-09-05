@@ -13,9 +13,10 @@ import {
 import { homedir } from 'node:os'
 import { basename, join } from 'node:path'
 import { execFileSync } from 'node:child_process'
+import { loadBridgeCreds, credsHelp, maskEmail, resolveBridgeDir, CHATGPT_KEYS } from './bridge-env.mjs'
 
 const home = homedir()
-const bridgeDir = process.env.CODEX_WORK_CHATGPT_DIR || join(home, '.config', 'codex-work', 'chatgpt-web')
+const bridgeDir = resolveBridgeDir(process.env.CODEX_WORK_CHATGPT_DIR || process.env.CHATGPT_BRIDGE_DIR || join(home, '.config', 'codex-work', 'chatgpt-web'), 'CODEX_WORK_CHATGPT_DIR')
 const profileDir = join(bridgeDir, 'profile')
 const librariesDir = join(bridgeDir, 'libs')
 const chatsFile = join(bridgeDir, 'chats.json')
@@ -67,18 +68,23 @@ const allowedVerdicts = new Set(['approve', 'approve-with-changes', 'request-cha
 
 function usage() {
   process.stderr.write(`Usage: chatgpt-consult <login|status|ask|chats|reset|approval|project> [options]\n\n`)
-  process.stderr.write(`  chatgpt-consult login [--switch] [--wait=SECONDS]   Open a visible browser so you can sign in to ChatGPT once.\n`)
+  process.stderr.write(`  chatgpt-consult login [--auto] [--switch] [--wait=SECONDS]   Open a visible browser so you can sign in to ChatGPT once.\n`)
   process.stderr.write(`  chatgpt-consult ask            Read prompt from stdin (or --file=FILE), send to ChatGPT, print reply.\n`)
   process.stderr.write(`  chatgpt-consult status         Check whether a signed-in profile exists.\n`)
   process.stderr.write(`  chatgpt-consult chats          List per-repo conversation state.\n`)
   process.stderr.write(`  chatgpt-consult reset          Drop the saved conversation mapping for the current repo+branch.\n`)
   process.stderr.write(`\nLOGIN OPTIONS:\n`)
+  process.stderr.write(`  --auto / --from-env / --env   Sign in automatically with credentials from .env (no manual typing).\n`)
   process.stderr.write(`  --switch              Keep browser open to switch account (waits for session token to change; does not auto-close if already logged in).\n`)
   process.stderr.write(`  --wait=SECONDS        After a new login is detected, keep browser open for SECONDS (default 0; implies --switch).\n`)
   process.stderr.write(`  --keep-open / --stay-open   Alias for --switch.\n`)
-  process.stderr.write(`\nask options: --new --headless --timeout=SECONDS --file=PATH --project[=NAME] --no-project\n`)
+  process.stderr.write(`\nask options: --new --headless --timeout=SECONDS --file=PATH --project[=NAME] --no-project --no-auto-login\n`)
   process.stderr.write(`approval: get | set VERDICT HEAD_SHA [PR] | clear\n`)
   process.stderr.write(`project (experimental): list | create [NAME] | attach NAME | detach | resolve\n`)
+  process.stderr.write(`\nENV FILE (~/.config/codex-work/chatgpt-web/.env, mode 600, never committed):\n`)
+  process.stderr.write(`  CHATGPT_EMAIL=you@example.com\n`)
+  process.stderr.write(`  CHATGPT_PASSWORD=your-password\n`)
+  process.stderr.write(`  # aliases: OPENAI_EMAIL / OPENAI_PASSWORD. Shell env overrides the file.\n`)
 }
 
 function sleep(ms) {
@@ -248,6 +254,241 @@ async function handleCloudflare(page) {
     await sleep(2000)
   }
   throw new Error('ChatGPT Web remained behind a Cloudflare challenge')
+}
+async function pageBodyText(page) {
+  try { return String(await page.evaluate(() => document.body ? document.body.innerText.slice(0, 4000) : '')).toLowerCase() } catch { return '' }
+}
+
+function detectChatgptBlocker(bodyText, url) {
+  if (!bodyText) return null
+  if (/wrong (email|password)|incorrect.*password|invalid.*credentials|wrong.*credentials/.test(bodyText)) {
+    return 'ChatGPT báo sai email/password — kiểm tra lại .env rồi thử lại.'
+  }
+  if (/verify you are human|captcha|challenge|unusual activity|suspicious|verify.*identity/.test(bodyText)) {
+    return 'ChatGPT yêu cầu xác minh người thật (CAPTCHA/Cloudflare) — hoàn thành 1 lần bằng `login` thủ công, các lần sau dùng session đã lưu.'
+  }
+  if (/two-?factor|2fa|multi-?factor|mfa|authenticator|verification code|check your email|we sent you|enter.*code/.test(bodyText)) {
+    return 'Tài khoản bật 2FA/mã xác minh qua email — auto-login không thể tự qua bước này. Đăng nhập thủ công 1 lần (`login`), session sẽ được tái dùng.'
+  }
+  if (/this browser or app may not be secure|browser.*not.*secure|couldn.t sign you in/.test(bodyText)) {
+    return 'ChatGPT/Google chặn trình duyệt tự động — đăng nhập thủ công 1 lần (`login`) để lưu session.'
+  }
+  if (/rate.?limit|too many (attempts|requests)|try again later/.test(bodyText)) {
+    return 'Bị giới hạn số lần đăng nhập — đợi vài phút rồi thử lại.'
+  }
+  if (url.includes('__cf_chl') || url.includes('challenges.cloudflare')) {
+    return 'Đang kẹt ở Cloudflare challenge — thử lại ở môi trường có display (headful) hoặc login thủ công 1 lần.'
+  }
+  return null
+}
+
+function loadChatgptCreds() {
+  const envFileVar = (process.env.CODEX_WORK_CHATGPT_ENV_FILE || '').trim() ? 'CODEX_WORK_CHATGPT_ENV_FILE' : 'CHATGPT_ENV_FILE'
+  return loadBridgeCreds({ bridgeDir, envFileVar, emailKeys: CHATGPT_KEYS.emailKeys, passwordKeys: CHATGPT_KEYS.passwordKeys })
+}
+
+async function hasRealBox(el) {
+  try { const box = await el.boundingBox(); return !!box && box.width >= 2 && box.height >= 2 } catch { return false }
+}
+async function fillFirstVisible(page, selectors, value, timeoutMs = 8000) {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    for (const sel of selectors) {
+      try {
+        const loc = page.locator(sel)
+        const n = await loc.count()
+        for (let i = 0; i < n; i++) {
+          const el = loc.nth(i)
+          try {
+            if (!(await hasRealBox(el))) continue
+            if (!(await el.isVisible().catch(()=>false))) continue
+            await el.click({timeout:2000}).catch(()=>{})
+            await el.fill(value, {timeout:5000})
+            return sel
+          } catch {}
+        }
+      } catch {}
+    }
+    await sleep(500)
+  }
+  return null
+}
+async function clickFirstVisible(page, selectors, timeoutMs = 8000) {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    for (const sel of selectors) {
+      try {
+        const loc = page.locator(sel)
+        const n = await loc.count()
+        for (let i = 0; i < n; i++) {
+          const el = loc.nth(i)
+          try {
+            if (!(await hasRealBox(el))) continue
+            if (!(await el.isVisible().catch(()=>false))) continue
+            await el.click({timeout:3000})
+            return sel
+          } catch {}
+        }
+      } catch {}
+    }
+    await sleep(500)
+  }
+  return null
+}
+async function anyRealVisible(page, selectors) {
+  for (const sel of selectors) {
+    try {
+      const loc = page.locator(sel)
+      const n = await loc.count()
+      for (let i = 0; i < n; i++) {
+        const el = loc.nth(i)
+        if ((await hasRealBox(el)) && (await el.isVisible().catch(()=>false))) return true
+      }
+    } catch {}
+  }
+  return false
+}
+const CHATGPT_LOGIN_BTN = ['button[data-testid="login-button"]','a[data-testid="login-button"]','button:text-is("Log in")','a:text-is("Log in")','button:has-text("Log in")','a:has-text("Log in")','[data-testid="login-link"]']
+const CHATGPT_EMAIL_INPUT = ['input[type="email"]','input[name="username"]','input[name="email"]','#email-input','input[id*="email"]','input[autocomplete="username"]']
+const CHATGPT_PASSWORD_INPUT = ['input[type="password"]','input[name="password"]','#password','input[autocomplete="current-password"]']
+const CHATGPT_CONTINUE_BTN = ['button[type="submit"]','button:has-text("Continue")','button:has-text("Log in")','button:has-text("Sign in")']
+const GOOGLE_ID_INPUT = ['#identifierId','input[name="identifier"]','input[autocomplete*="username"]']
+const GOOGLE_ID_NEXT = ['#identifierNext','button:text-is("Next")','button:has-text("Next")']
+const GOOGLE_PW_INPUT = ['input[name="Passwd"]','input[type="password"]']
+const GOOGLE_PW_NEXT = ['#passwordNext','button:text-is("Next")','button:has-text("Next")']
+const GOOGLE_ALLOW_BTN = ['#submit_approve_access','button:text-is("Allow")','button:text-is("Continue")']
+const OPENAI_CODE_INPUT = ['input[autocomplete="one-time-code"]','input[name="code"]']
+
+async function fillFieldAndSubmit(page, selectors, value, fallbackBtns, timeoutMs = 6000) {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    try {
+      for (const sel of selectors) {
+        const loc = page.locator(sel)
+        const n = await loc.count()
+        for (let i = 0; i < n; i++) {
+          const el = loc.nth(i)
+          try {
+            if (!(await hasRealBox(el))) continue
+            if (!(await el.isVisible().catch(()=>false))) continue
+            await el.click({timeout:2000}).catch(()=>{})
+            await el.fill(value, {timeout:5000})
+            await page.waitForTimeout(400)
+            try {
+              const scoped = el.locator('xpath=ancestor::form//button[@type="submit"]').first()
+              if ((await scoped.count())>0 && (await hasRealBox(scoped)) && (await scoped.isVisible().catch(()=>false))) {
+                await scoped.click({timeout:3000})
+                return true
+              }
+            } catch {}
+            if (await clickFirstVisible(page, fallbackBtns, 4000)) return true
+            return true
+          } catch {}
+        }
+      }
+    } catch {}
+    await sleep(500)
+  }
+  return false
+}
+
+async function tryAutoLoginChatGPT(page, creds, { timeoutSec = 150 } = {}) {
+  const context = page.context()
+  const isLoggedIn = async () => (await context.cookies(chatUrl)).some(c=>c.name.startsWith('__Secure-next-auth.session-token'))
+  if (await isLoggedIn()) return true
+  process.stderr.write(`[bridge] auto-login as ${maskEmail(creds.email)} (from ${creds.emailSource==='env'?'env':creds.envPath})…\n`)
+  await page.goto(chatUrl, { waitUntil: 'domcontentloaded', timeout: 60000 })
+  await handleCloudflare(page)
+  for (let i=0;i<5;i++){ if(await isLoggedIn()) return true; await sleep(1000) }
+  const onGoogle = () => page.url().includes('accounts.google.com')
+  const onAuthHost = () => /auth\.openai\.com|auth0\.com|accounts\.openai\.com/.test(page.url())
+  const deadline = Date.now() + timeoutSec*1000
+  let acted = false
+  while (Date.now() < deadline) {
+    if (await isLoggedIn()) return true
+    const url = page.url()
+    const body = await pageBodyText(page)
+    if (await anyRealVisible(page, OPENAI_CODE_INPUT)) {
+      const pwOpt = page.locator('button:text-is("Continue with password")').first()
+      try {
+        if ((await pwOpt.count())>0 && (await hasRealBox(pwOpt))) {
+          process.stderr.write('[bridge] email-code screen — switching to password login…\n')
+          await pwOpt.click({timeout:3000})
+          acted = true
+          await page.waitForTimeout(2500)
+          continue
+        }
+      } catch {}
+      throw new Error('ChatGPT gửi mã xác minh về email (tài khoản chưa có password) — nhập mã thủ công 1 lần (`login`), hoặc bấm "Continue with password" trong bản web. Auto-login không đọc được inbox.')
+    }
+    const blocker = detectChatgptBlocker(body, url)
+    if (blocker && acted) throw new Error(blocker)
+    if (onGoogle()) {
+      if (await anyRealVisible(page, GOOGLE_ALLOW_BTN)) {
+        process.stderr.write('[bridge] Google consent — approving…\n')
+        await clickFirstVisible(page, GOOGLE_ALLOW_BTN, 5000)
+        acted = true
+        await page.waitForTimeout(3000)
+        continue
+      }
+      if (await anyRealVisible(page, GOOGLE_PW_INPUT)) {
+        process.stderr.write('[bridge] Google password screen…\n')
+        if (await fillFieldAndSubmit(page, GOOGLE_PW_INPUT, creds.password, GOOGLE_PW_NEXT, 8000)) acted = true
+        await page.waitForTimeout(3000)
+        continue
+      }
+      if (await anyRealVisible(page, GOOGLE_ID_INPUT)) {
+        process.stderr.write('[bridge] Google identifier screen…\n')
+        if (await fillFieldAndSubmit(page, GOOGLE_ID_INPUT, creds.email, GOOGLE_ID_NEXT, 8000)) acted = true
+        await page.waitForTimeout(3000)
+        continue
+      }
+      await sleep(2000)
+      continue
+    }
+    if (onAuthHost()) {
+      if (await anyRealVisible(page, CHATGPT_PASSWORD_INPUT)) {
+        process.stderr.write('[bridge] ChatGPT password screen…\n')
+        if (await fillFieldAndSubmit(page, CHATGPT_PASSWORD_INPUT, creds.password, CHATGPT_CONTINUE_BTN, 8000)) acted = true
+        await page.waitForTimeout(3000)
+        await handleCloudflare(page)
+        continue
+      }
+      if (await anyRealVisible(page, CHATGPT_EMAIL_INPUT)) {
+        if (await fillFieldAndSubmit(page, CHATGPT_EMAIL_INPUT, creds.email, CHATGPT_CONTINUE_BTN, 6000)) acted = true
+        await page.waitForTimeout(2500)
+        continue
+      }
+      await sleep(2000)
+      continue
+    }
+    if (await anyRealVisible(page, CHATGPT_EMAIL_INPUT)) {
+      process.stderr.write('[bridge] login modal — submitting email…\n')
+      if (await fillFieldAndSubmit(page, CHATGPT_EMAIL_INPUT, creds.email, CHATGPT_CONTINUE_BTN, 6000)) acted = true
+      await page.waitForTimeout(2500)
+      await handleCloudflare(page)
+      continue
+    }
+    await clickFirstVisible(page, CHATGPT_LOGIN_BTN, 4000)
+    await page.waitForTimeout(2000)
+    await handleCloudflare(page)
+  }
+  const lastUrl = page.url()
+  const lastBody = (await pageBodyText(page)).slice(0,200)
+  const finalBlocker = detectChatgptBlocker(await pageBodyText(page), lastUrl)
+  throw new Error(finalBlocker || `Timed out after ${timeoutSec}s waiting for ChatGPT login as ${maskEmail(creds.email)} (last url: ${lastUrl.slice(0,80)} — "${lastBody}"). Kiểm tra email/password trong .env hoặc đăng nhập thủ công 1 lần: chatgpt-consult login`)
+}
+
+async function ensureChatgptLoggedIn(page, { allowAuto = true } = {}) {
+  const context = page.context()
+  const isLoggedIn = async () => (await context.cookies(chatUrl)).some(c=>c.name.startsWith('__Secure-next-auth.session-token'))
+  for (let i=0;i<6;i++){ if(await isLoggedIn()) return true; await sleep(1000) }
+  if (!allowAuto) return false
+  const creds = loadChatgptCreds()
+  for (const w of creds.warnings) process.stderr.write(`[bridge] WARN: ${w}\n`)
+  if (!creds.configured) return false
+  process.stderr.write(`[bridge] session hết hạn — tự đăng nhập lại từ .env (${maskEmail(creds.email)})…\n`)
+  try { await tryAutoLoginChatGPT(page, creds); return await isLoggedIn() } catch (e) { process.stderr.write(`[bridge] auto-login thất bại: ${e.message}\n`); return false }
 }
 
 async function captureProjects(page) {
@@ -443,6 +684,7 @@ async function reply(page, timeoutSeconds, previousCount) {
 async function login() {
   const loginArgs = commandArgs
   const has = (flag) => loginArgs.includes(flag)
+  const autoMode = has('--auto') || has('--from-env') || has('--env')
   const waitArg = loginArgs.find((a) => a.startsWith('--wait='))
   let keepOpenSec = 0
   let switchMode = has('--switch') || has('--stay-open') || has('--keep-open') || !!waitArg
@@ -451,6 +693,30 @@ async function login() {
     if (!Number.isNaN(v) && v >= 0) keepOpenSec = v
   } else if (has('--wait') || has('--stay-open') || has('--keep-open')) {
     keepOpenSec = 0
+  }
+  if (autoMode) {
+    const creds = loadChatgptCreds()
+    for (const w of creds.warnings) process.stderr.write(`[bridge] WARN: ${w}\n`)
+    if (!creds.configured) {
+      process.stderr.write(credsHelp({ bridgeLabel: 'ChatGPT', envPath: creds.envPath, emailKeys: CHATGPT_KEYS.emailKeys, passwordKeys: CHATGPT_KEYS.passwordKeys }) + '\n')
+      process.exit(1)
+    }
+    const timeoutArg = loginArgs.find((a) => a.startsWith('--timeout='))
+    const loginTimeout = timeoutArg ? Number.parseInt(timeoutArg.slice(10), 10) || 150 : 150
+    const headless = has('--headless') ? true : false
+    const context = await launch(headless)
+    const page = context.pages()[0] || await context.newPage()
+    try {
+      await tryAutoLoginChatGPT(page, creds, { timeoutSec: loginTimeout })
+      process.stderr.write('LOGIN OK — session saved (auto-login from .env).\n')
+      await context.close()
+      return
+    } catch (e) {
+      process.stderr.write(`Auto-login thất bại: ${e.message}\n`)
+      process.stderr.write('Fallback: chạy `chatgpt-consult login` thủ công 1 lần để lưu session (2FA/CAPTCHA không tự qua được).\n')
+      try { await context.close() } catch {}
+      process.exit(1)
+    }
   }
   const context = await launch(false)
   let browserClosed = false
@@ -557,6 +823,7 @@ async function status() {
   const cookiesFile = join(profileDir, 'Default', 'Cookies')
   const profileExists = existsSync(profileDir)
   const cookiesExist = existsSync(cookiesFile)
+  const creds = loadChatgptCreds()
   let loggedIn = false
   if (profileExists && existsSync(localState)) {
     let context
@@ -578,7 +845,7 @@ async function status() {
       if (context) try { await context.close() } catch {}
     }
   }
-  process.stdout.write(`${JSON.stringify({ profileExists, cookiesExist, loggedIn })}\n`)
+  process.stdout.write(`${JSON.stringify({ profileExists, cookiesExist, loggedIn, envConfigured: creds.configured, envFileExists: creds.fileExists })}\n`)
 }
 
 async function ask() {
@@ -588,9 +855,11 @@ async function ask() {
   let forceNew = false
   let useProject = null
   let requestedProject = null
+  let allowAutoLogin = true
   for (const option of commandArgs) {
     if (option === '--new') forceNew = true
     else if (option === '--headless') headless = true
+    else if (option === '--no-auto-login') allowAutoLogin = false
     else if (option.startsWith('--timeout=')) timeoutSeconds = Number.parseInt(option.slice(10), 10)
     else if (option.startsWith('--file=')) prompt = readFileSync(option.slice(7), 'utf8')
     else if (option === '--project') useProject = true
@@ -619,7 +888,15 @@ async function ask() {
     const page = context.pages()[0] || await context.newPage()
     await page.goto(chatUrl, { waitUntil: 'domcontentloaded', timeout: 60000 })
     await handleCloudflare(page)
-    if (!(await signedIn(context))) throw new Error('ChatGPT Web is not signed in; run chatgpt-consult login first')
+    {
+      const pageForLogin = page
+      const loggedIn = await ensureChatgptLoggedIn(pageForLogin, { allowAuto: allowAutoLogin })
+      if (!loggedIn) {
+        const creds = loadChatgptCreds()
+        const hint = creds.configured ? 'Auto-login từ .env thất bại — thử `login --auto` để xem chi tiết, hoặc `login` thủ công 1 lần.' : `ChatGPT not signed in. Chạy thủ công 1 lần:  chatgpt-consult login   — hoặc cấu hình .env rồi chạy:  chatgpt-consult login --auto  (xem --help). File: ${creds.envPath}`
+        throw new Error(hint)
+      }
+    }
     let project = null
     if (projectMode) {
       const projectName = requestedProject || repo.name
@@ -783,11 +1060,11 @@ async function main() {
     throw new Error(`${command} does not accept options`)
   }
   if (command === 'login') {
-    const allowedLogin = new Set(['--switch', '--stay-open', '--keep-open'])
+    const allowedLogin = new Set(['--switch', '--stay-open', '--keep-open', '--auto', '--from-env', '--env', '--headless', '--headful'])
     for (const arg of commandArgs) {
-      if (allowedLogin.has(arg) || arg.startsWith('--wait=')) continue
+      if (allowedLogin.has(arg) || arg.startsWith('--wait=') || arg.startsWith('--timeout=')) continue
       if (arg === '--wait' || arg === '--stay-open' || arg === '--keep-open') continue
-      throw new Error(`unknown login option: ${arg} (allowed: --switch, --wait=SECONDS, --keep-open, --stay-open)`)
+      throw new Error(`unknown login option: ${arg} (allowed: --auto, --switch, --wait=SECONDS, --keep-open, --stay-open, --timeout=SECONDS, --headless/--headful)`)
     }
   }
   await acquireLock()

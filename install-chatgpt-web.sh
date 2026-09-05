@@ -120,6 +120,7 @@ install -d "$BIN_DIR" "$CODEX_DIR"
 install -m 0755 "$SOURCE_DIR/chatgpt-consult" "$BIN_DIR/chatgpt-consult"
 install -m 0755 "$SOURCE_DIR/chatgpt-autoreview" "$BIN_DIR/chatgpt-autoreview"
 install -m 0755 "$SOURCE_DIR/chatgpt-consult.mjs" "$BRIDGE_DIR/chatgpt-consult.mjs"
+install -m 0644 "$SOURCE_DIR/bridge-env.mjs" "$BRIDGE_DIR/bridge-env.mjs"
 install -m 0644 "$SOURCE_DIR/package.json" "$BRIDGE_DIR/package.json"
 install -m 0644 "$SOURCE_DIR/package-lock.json" "$BRIDGE_DIR/package-lock.json"
 
@@ -128,6 +129,16 @@ if [[ -e "$BRIDGE_DIR/bridge-config.json" ]]; then
 else
     install -m 0600 "$SOURCE_DIR/bridge-config.json" "$BRIDGE_DIR/bridge-config.json"
     printf 'Installed bridge config: %s\n' "$BRIDGE_DIR/bridge-config.json"
+fi
+
+# Per-bridge .env for auto-login (never overwrite real creds)
+if [[ ! -f "$BRIDGE_DIR/.env" ]]; then
+    printf '# ChatGPT auto-login (chmod 600, never commit)\n# See config/chatgpt-bridge.env.example for docs.\nCHATGPT_EMAIL=\nCHATGPT_PASSWORD=\n' > "$BRIDGE_DIR/.env"
+    chmod 0600 "$BRIDGE_DIR/.env" 2>/dev/null || true
+    printf 'Created %s/.env (fill CHATGPT_EMAIL/CHATGPT_PASSWORD, chmod 600) — or run manual login\n' "$BRIDGE_DIR"
+else
+    chmod 0600 "$BRIDGE_DIR/.env" 2>/dev/null || true
+    printf 'Kept existing %s/.env\n' "$BRIDGE_DIR"
 fi
 
 if [[ "${CODEX_WORK_SKIP_NPM_INSTALL:-0}" != "1" ]]; then
@@ -187,4 +198,5 @@ if [[ -s "$OVERRIDE_FILE" ]]; then
 fi
 
 printf '\nInstalled command: %s/chatgpt-consult\n' "$BIN_DIR"
-printf 'Next: chatgpt-consult login; optionally run chatgpt-autoreview on; then restart Codex.\n'
+printf 'Next: chatgpt-consult login (--auto from .env) or chatgpt-consult login --auto; then chatgpt-consult status.\n'
+printf '  Manual: chatgpt-consult login   | Auto: fill %s/.env (CHATGPT_EMAIL/PASSWORD) then chatgpt-consult login --auto\n' "$BRIDGE_DIR"

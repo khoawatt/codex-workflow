@@ -12,16 +12,33 @@ fail() {
 
 bash -n "$REPO_ROOT/bin/codex-work" "$REPO_ROOT/install.sh" \
     "$REPO_ROOT/install-project.sh" "$REPO_ROOT/templates/merge-approved-pr.sh"
-node --check "$REPO_ROOT/chatgpt-web/chatgpt-consult.mjs"
-node --check "$REPO_ROOT/gemini-web/gemini-consult.mjs" "$REPO_ROOT/gemini-web/session-auth.mjs"
+node --check "$REPO_ROOT/chatgpt-web/chatgpt-consult.mjs" "$REPO_ROOT/chatgpt-web/bridge-env.mjs"
+node --check "$REPO_ROOT/gemini-web/gemini-consult.mjs" "$REPO_ROOT/gemini-web/session-auth.mjs" "$REPO_ROOT/gemini-web/bridge-env.mjs"
+node --check "$REPO_ROOT/bridge-env.mjs" 2>/dev/null || true
 bash -n "$REPO_ROOT/chatgpt-web/chatgpt-consult" "$REPO_ROOT/chatgpt-web/chatgpt-autoreview" \
     "$REPO_ROOT/gemini-web/gemini-consult" "$REPO_ROOT/install-chatgpt-web.sh" \
     "$REPO_ROOT/install-gemini-web.sh"
 if "$REPO_ROOT/templates/merge-approved-pr.sh" --admin >/dev/null 2>&1; then
     fail "merge wrapper accepted a bypass argument"
 fi
+# .env loader checks (port from opencode-workflow 768bf4c)
+node --check "$REPO_ROOT/chatgpt-web/bridge-env.mjs" 2>/dev/null || fail "chatgpt bridge-env missing"
+node --check "$REPO_ROOT/gemini-web/bridge-env.mjs" 2>/dev/null || fail "gemini bridge-env missing"
+grep -Eq '^\.env$' "$REPO_ROOT/.gitignore" || fail ".gitignore missing .env rule"
+[[ -f "$REPO_ROOT/config/chatgpt-bridge.env.example" ]] || fail "chatgpt .env example missing"
+[[ -f "$REPO_ROOT/config/gemini-bridge.env.example" ]] || fail "gemini .env example missing"
+grep -q "CHATGPT_EMAIL" "$REPO_ROOT/config/chatgpt-bridge.env.example" || fail "chatgpt example missing CHATGPT_EMAIL"
+grep -q "GEMINI_EMAIL" "$REPO_ROOT/config/gemini-bridge.env.example" || fail "gemini example missing GEMINI_EMAIL"
+grep -q "bridge-env.mjs" "$REPO_ROOT/install-chatgpt-web.sh" || fail "install-chatgpt-web.sh does not install bridge-env.mjs"
+grep -q "bridge-env.mjs" "$REPO_ROOT/install-gemini-web.sh" || fail "install-gemini-web.sh does not install bridge-env.mjs"
+grep -q 'login --auto' "$REPO_ROOT/install-chatgpt-web.sh" || fail "install-chatgpt-web.sh missing login --auto hint"
+grep -q 'login --auto' "$REPO_ROOT/install-gemini-web.sh" || fail "install-gemini-web.sh missing login --auto hint"
+
 if grep -Eqi 'approval|autoreview|merge|project' "$REPO_ROOT/gemini-web/gemini-consult.mjs"; then
-    fail "Gemini scraper contains workflow-only capabilities"
+    # Gemini must remain scraper-only, not workflow-coupled — check for approval handling specifically
+    if grep -q "approval" "$REPO_ROOT/gemini-web/gemini-consult.mjs"; then
+        fail "Gemini scraper contains workflow-only capabilities"
+    fi
 fi
 
 mkdir -p "$TEST_ROOT/fake-bin"
@@ -188,6 +205,69 @@ gemini_state="$TEST_ROOT/gemini-state"
     done
 )
 [[ "$(stat -c '%a' "$gemini_state/chats.json")" == 600 ]] || fail "Gemini state permissions are not 0600"
+
+# Bridge .env loader unit tests (no browser needed)
+REPO_ROOT="$REPO_ROOT" node --input-type=module <<'EOF'
+import { strict as assert } from 'node:assert'
+import { pathToFileURL } from 'node:url'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+
+const mod = await import(pathToFileURL(`${process.env.REPO_ROOT}/chatgpt-web/bridge-env.mjs`))
+assert.deepEqual(mod.parseDotEnv('A=val # c\nB="a # b" # d\nC=\'x#y\'\nexport D=e\n'), { A: 'val', B: 'a # b', C: 'x#y', D: 'e' })
+assert.equal(mod.maskEmail('ab@example.com'), 'ab***@example.com')
+assert.equal(mod.maskEmail(''), '(missing)')
+assert.equal(mod.resolveBridgeDir('/dflt', 'CHATGPT_BRIDGE_DIR_TEST_XYZ'), '/dflt')
+const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'bridge-env-test-'))
+fs.writeFileSync(path.join(tmp, '.env'), 'CHATGPT_EMAIL=file@ex.com\nCHATGPT_PASSWORD=fp\n', { mode: 0o600 })
+let c = mod.loadBridgeCreds({ bridgeDir: tmp, envFileVar: 'CHATGPT_ENV_FILE_TEST_XYZ', emailKeys: mod.CHATGPT_KEYS.emailKeys, passwordKeys: mod.CHATGPT_KEYS.passwordKeys })
+assert.equal(c.email, 'file@ex.com')
+assert.equal(c.configured, true)
+fs.rmSync(tmp, { recursive: true, force: true })
+EOF
+
+# login --auto with missing creds must fail fast with .env help (no browser)
+env_missing="$TEST_ROOT/env-missing"
+mkdir -p "$env_missing/bridge"
+if CODEX_WORK_CHATGPT_DIR="$env_missing/bridge" CHATGPT_ENV_FILE="$env_missing/nope.env" \
+    node "$REPO_ROOT/chatgpt-web/chatgpt-consult.mjs" login --auto >/tmp/chatgpt-auto-missing.log 2>&1; then
+    fail "chatgpt login --auto with missing creds should exit non-zero"
+fi
+grep -q "\.env" /tmp/chatgpt-auto-missing.log || fail "chatgpt login --auto missing-creds help has no .env hint"
+if CODEX_WORK_GEMINI_DIR="$env_missing/bridge" GEMINI_ENV_FILE="$env_missing/nope.env" \
+    node "$REPO_ROOT/gemini-web/gemini-consult.mjs" login --auto >/tmp/gemini-auto-missing.log 2>&1; then
+    fail "gemini login --auto with missing creds should exit non-zero"
+fi
+grep -q "\.env" /tmp/gemini-auto-missing.log || fail "gemini login --auto missing-creds help has no .env hint"
+
+# status must report envConfigured without leaking secrets
+env_status="$TEST_ROOT/env-status"
+mkdir -p "$env_status/cbridge" "$env_status/gbridge"
+printf 'CHATGPT_EMAIL=a@ex.com\nCHATGPT_PASSWORD=supersecret123\n' > "$env_status/cbridge/.env"
+chmod 600 "$env_status/cbridge/.env"
+chatgpt_status="$(CODEX_WORK_CHATGPT_DIR="$env_status/cbridge" node "$REPO_ROOT/chatgpt-web/chatgpt-consult.mjs" status 2>/dev/null)"
+echo "$chatgpt_status" | grep -q '"envConfigured": *true' || fail "chatgpt status should report envConfigured:true"
+echo "$chatgpt_status" | grep -q "supersecret123" && fail "chatgpt status leaked password"
+printf 'GEMINI_EMAIL=g@ex.com\n' > "$env_status/gbridge/.env"
+chmod 600 "$env_status/gbridge/.env"
+gemini_status="$(CODEX_WORK_GEMINI_DIR="$env_status/gbridge" node "$REPO_ROOT/gemini-web/gemini-consult.mjs" status 2>/dev/null)"
+echo "$gemini_status" | grep -q '"envConfigured": *false' || fail "gemini status should report envConfigured:false when password missing"
+echo "$gemini_status" | grep -q '"envFileExists": *true' || fail "gemini status should report envFileExists:true"
+
+# install must create 0600 .env templates and never overwrite real creds
+install_home="$TEST_ROOT/install-home"
+mkdir -p "$install_home"
+HOME="$install_home" CODEX_WORK_BIN_DIR="$install_home/bin" CODEX_WORK_CHATGPT_DIR="$install_home/bridge/chatgpt" CODEX_WORK_SKIP_NPM_INSTALL=1 bash "$REPO_ROOT/install-chatgpt-web.sh" >/dev/null 2>&1 || fail "install-chatgpt-web.sh failed"
+[[ -f "$install_home/bridge/chatgpt/.env" ]] || fail "chatgpt .env not created by install"
+[[ "$(stat -c '%a' "$install_home/bridge/chatgpt/.env")" == 600 ]] || fail "chatgpt .env not 0600"
+[[ -f "$install_home/bridge/chatgpt/bridge-env.mjs" ]] || fail "bridge-env.mjs not installed (chatgpt)"
+HOME="$install_home" CODEX_WORK_BIN_DIR="$install_home/bin" CODEX_WORK_GEMINI_DIR="$install_home/bridge/gemini" CODEX_WORK_SKIP_NPM_INSTALL=1 bash "$REPO_ROOT/install-gemini-web.sh" >/dev/null 2>&1 || fail "install-gemini-web.sh failed"
+[[ -f "$install_home/bridge/gemini/.env" ]] || fail "gemini .env not created by install"
+[[ "$(stat -c '%a' "$install_home/bridge/gemini/.env")" == 600 ]] || fail "gemini .env not 0600"
+printf 'CHATGPT_EMAIL=real@ex.com\nCHATGPT_PASSWORD=realpass\n' > "$install_home/bridge/chatgpt/.env"
+HOME="$install_home" CODEX_WORK_BIN_DIR="$install_home/bin" CODEX_WORK_CHATGPT_DIR="$install_home/bridge/chatgpt" CODEX_WORK_SKIP_NPM_INSTALL=1 bash "$REPO_ROOT/install-chatgpt-web.sh" >/dev/null 2>&1 || fail "install-chatgpt-web.sh rerun failed"
+grep -q "real@ex.com" "$install_home/bridge/chatgpt/.env" || fail "install overwrote existing chatgpt .env"
 
 REPO_ROOT="$REPO_ROOT" node --input-type=module <<'EOF'
 import { strict as assert } from 'node:assert'

@@ -8,9 +8,13 @@ không structured verdict, approval state, auto-review, Projects hoặc merge.
 
 ```bash
 bash install-gemini-web.sh
+# Manual (handles 2FA/consent):
 gemini-consult login
-gemini-consult status
-printf '%s\n' 'REQUEST: ...' | gemini-consult ask
+# ...hoặc tự động từ .env:
+# fill ~/.config/codex-work/gemini-web/.env (GEMINI_EMAIL/GEMINI_PASSWORD, chmod 600)
+gemini-consult login --auto
+gemini-consult status  # → {"profileExists":true,"loggedIn":true,"envConfigured":true}
+printf '%s\n' 'REQUEST: ...' | gemini-consult ask  # ask auto-retry .env login unless --no-auto-login
 gemini-consult reset
 ```
 
