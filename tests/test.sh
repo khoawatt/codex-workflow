@@ -12,7 +12,7 @@ fail() {
 
 bash -n "$REPO_ROOT/bin/codex-work" "$REPO_ROOT/install.sh" \
     "$REPO_ROOT/install-project.sh" "$REPO_ROOT/templates/merge-approved-pr.sh"
-node --check "$REPO_ROOT/chatgpt-web/chatgpt-consult.mjs" "$REPO_ROOT/chatgpt-web/bridge-env.mjs"
+node --check "$REPO_ROOT/chatgpt-web/chatgpt-consult.mjs" "$REPO_ROOT/chatgpt-web/bridge-env.mjs" "$REPO_ROOT/chatgpt-web/chatgpt-auth-flow.mjs"
 node --check "$REPO_ROOT/gemini-web/gemini-consult.mjs" "$REPO_ROOT/gemini-web/session-auth.mjs" "$REPO_ROOT/gemini-web/bridge-env.mjs"
 node --check "$REPO_ROOT/bridge-env.mjs" 2>/dev/null || true
 bash -n "$REPO_ROOT/chatgpt-web/chatgpt-consult" "$REPO_ROOT/chatgpt-web/chatgpt-autoreview" \
@@ -33,6 +33,138 @@ grep -q "bridge-env.mjs" "$REPO_ROOT/install-chatgpt-web.sh" || fail "install-ch
 grep -q "bridge-env.mjs" "$REPO_ROOT/install-gemini-web.sh" || fail "install-gemini-web.sh does not install bridge-env.mjs"
 grep -q 'login --auto' "$REPO_ROOT/install-chatgpt-web.sh" || fail "install-chatgpt-web.sh missing login --auto hint"
 grep -q 'login --auto' "$REPO_ROOT/install-gemini-web.sh" || fail "install-gemini-web.sh missing login --auto hint"
+grep -q "chatgpt-auth-flow.mjs" "$REPO_ROOT/install-chatgpt-web.sh" || fail "install-chatgpt-web.sh does not install chatgpt-auth-flow.mjs"
+grep -q "CHATGPT_TOTP_SECRET" "$REPO_ROOT/config/chatgpt-bridge.env.example" || fail "chatgpt example missing CHATGPT_TOTP_SECRET"
+[[ -f "$REPO_ROOT/chatgpt-web/chatgpt-auth-flow.mjs" ]] || fail "chatgpt-auth-flow.mjs missing"
+
+# ChatGPT/OpenAI auth transaction behavior (no browser required, port from opencode-workflow).
+REPO_ROOT="$REPO_ROOT" node --input-type=module <<'EOF'
+import { strict as assert } from 'node:assert'
+import { pathToFileURL } from 'node:url'
+
+const auth = await import(pathToFileURL(`${process.env.REPO_ROOT}/chatgpt-web/chatgpt-auth-flow.mjs`))
+
+for (const body of ['Oops, an error occurred', 'Route Error', '400 Invalid content type']) {
+  assert.equal(auth.isAuth0RouteError(body), true, `missed Route Error text: ${body}`)
+}
+assert.equal(auth.isAuth0RouteError('Incorrect password'), false)
+assert.equal(auth.isRecoverableOpenAiRouteError('Oops, an error occurred', 'https://auth.openai.com/u/login'), true)
+assert.equal(auth.isRecoverableOpenAiRouteError('Oops, an error occurred', 'https://accounts.google.com/signin'), false)
+assert.equal(auth.isRecoverableOpenAiRouteError('Oops, an error occurred', 'https://chatgpt.com/'), false)
+assert.match(auth.detectOpenAiAuthBlocker('Incorrect password', 'https://auth.openai.com/'), /email\/password/)
+assert.match(auth.detectOpenAiAuthBlocker('Enter your verification code', 'https://auth.openai.com/'), /2FA/)
+assert.equal(auth.detectOpenAiAuthBlocker('', 'https://auth.openai.com/'), null)
+assert.equal(auth.isInteractiveOpenAiChallenge('Enter your verification code', 'https://auth.openai.com/'), true)
+assert.equal(auth.isInteractiveOpenAiChallenge('Verify you are human', 'https://auth.openai.com/'), true)
+assert.equal(auth.isInteractiveOpenAiChallenge('', 'https://example.com/?__cf_chl=1'), true)
+assert.equal(auth.isInteractiveOpenAiChallenge('Incorrect password', 'https://auth.openai.com/'), false)
+
+const attempt = auth.createOpenAiAuthAttempt()
+assert.equal(auth.claimPasswordSubmit(attempt), true)
+assert.equal(auth.claimPasswordSubmit(attempt), false, 'password was submitted twice in one transaction')
+for (let recovery = 1; recovery <= 3; recovery++) {
+  assert.equal(auth.claimRouteRecovery(attempt), true, `recovery ${recovery} should be allowed`)
+  assert.equal(attempt.recoveries, recovery)
+  assert.equal(auth.claimPasswordSubmit(attempt), true, 'a recovered transaction should allow one new submit')
+  assert.equal(auth.claimPasswordSubmit(attempt), false, 'recovered transaction allowed a duplicate submit')
+}
+assert.equal(auth.claimRouteRecovery(attempt), false, 'manual/auto recovery exceeded three attempts')
+assert.match(auth.ROUTE_RECOVERY_EXHAUSTED_MESSAGE, /chatgpt-consult logout\nchatgpt-consult login/)
+
+async function runWait({ busy, terminalAt = null }) {
+  let clock = 0
+  const result = await auth.waitForOpenAiPasswordOutcome({
+    observe: async () => {
+      if (terminalAt !== null && clock >= terminalAt) return { state: 'auth0-error' }
+      return { state: 'pending', busy }
+    },
+    wait: async (ms) => { clock += ms },
+    now: () => clock,
+    pollMs: 1000,
+  })
+  return { result, clock }
+}
+
+const quiet = await runWait({ busy: false })
+assert.deepEqual(quiet.result, { state: 'stuck' })
+assert.equal(quiet.clock, 25000, 'quiet submit was declared stuck before 25 seconds')
+
+const busy = await runWait({ busy: true })
+assert.deepEqual(busy.result, { state: 'timeout' })
+assert.equal(busy.clock, 60000, 'busy submit did not continue to the 60-second hard timeout')
+
+const routeError = await runWait({ busy: false, terminalAt: 5000 })
+assert.deepEqual(routeError.result, { state: 'auth0-error' })
+assert.equal(routeError.clock, 5000)
+
+assert.equal(auth.isOpenAiAuthTransactionCookie({ domain: '.auth.openai.com', name: 'state' }), true)
+assert.equal(auth.isOpenAiAuthTransactionCookie({ domain: 'tenant.us.auth0.com', name: 'a0.spajs.txs.example' }), true)
+assert.equal(auth.isOpenAiAuthTransactionCookie({ domain: 'auth0.openai.com', name: 'nonce' }), true)
+assert.equal(auth.isOpenAiAuthTransactionCookie({ domain: '.auth.openai.com', name: 'auth0' }), false, 'Auth0 SSO cookie must be preserved')
+assert.equal(auth.isOpenAiAuthTransactionCookie({ domain: 'accounts.google.com', name: 'state' }), false)
+assert.equal(auth.isOpenAiAuthTransactionCookie({ domain: '.chatgpt.com', name: 'state' }), false)
+assert.equal(auth.isOpenAiAuthTransactionStorageKey('a0.spajs.txs.example'), true)
+assert.equal(auth.isOpenAiAuthTransactionStorageKey('oauth_state'), true)
+assert.equal(auth.isOpenAiAuthTransactionStorageKey('@@auth0spajs@@::client::audience::scope'), false, 'Auth0 token cache must be preserved')
+assert.equal(auth.isOpenAiAuthUrl('https://auth.openai.com/u/login/password'), true)
+assert.equal(auth.isOpenAiAuthUrl('https://tenant.us.auth0.com/authorize'), true)
+assert.equal(auth.isOpenAiAuthUrl('https://auth0.openai.com/authorize'), true)
+assert.equal(auth.isOpenAiAuthUrl('https://accounts.google.com/signin'), false)
+assert.equal(auth.isOpenAiAuthUrl('https://chatgpt.com/'), false)
+assert.equal(auth.isOpenAiAuthUrl('https://auth0.com.evil.example/'), false)
+assert.equal(auth.isOpenAiAuthUrl('https://notauth0.com/'), false)
+
+const RFC_B32 = 'GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ'
+assert.deepEqual(auth.base32Decode(RFC_B32), Buffer.from('12345678901234567890'), 'base32 must decode to the RFC 6238 raw key')
+assert.equal(auth.base32Decode('  gezd gnbv gy3t qojq gezd gnbv gy3t qojq ').toString(), '12345678901234567890', 'base32 must ignore whitespace/case')
+for (const bad of ['', 'ABC!DEFG', 'MZ======', 'AB==CD==', 'A']) {
+  assert.throws(() => auth.base32Decode(bad), /invalid TOTP secret/, `bad secret accepted: ${bad}`)
+}
+try { auth.base32Decode('!!'); assert.fail('expected throw') } catch (e) { assert.match(e.message, /invalid TOTP secret/); assert.ok(!/!!/.test(e.message), 'error echoed the secret') }
+// RFC 6238 Appendix B SHA-1 vectors, 8 digits
+for (const [t, expected] of [[59, '94287082'], [1111111109, '07081804'], [1111111111, '14050471'], [1234567890, '89005924'], [2000000000, '69279037'], [20000000000, '65353130']]) {
+  const { code } = auth.totpCode(RFC_B32, { timeMs: t * 1000, digits: 8 })
+  assert.equal(code, expected, `RFC6238 vector t=${t}`)
+}
+assert.equal(auth.totpCounterAt(59000), 1)
+assert.equal(auth.totpMsRemainingInWindow(59000), 1000)
+
+const mfaUrl = 'https://auth.openai.com/mfa-challenge/abc'
+assert.equal(auth.isOpenAiAuthenticatorChallenge('Check your authenticator app. Enter the one-time authentication code.', mfaUrl), true)
+assert.equal(auth.isOpenAiAuthenticatorChallenge('Check your email. We sent you a code.', 'https://auth.openai.com/u/email-verify'), false, 'email-code must not be TOTP-eligible')
+assert.equal(auth.isOpenAiAuthenticatorChallenge('Enter the one-time code from your app', 'https://evil.example/otp'), false, 'non-OpenAI origin must never be TOTP-eligible')
+assert.equal(auth.isOpenAiAuthenticatorChallenge('Enter the one-time code from your app', 'https://chatgpt.com/'), false, 'chatgpt.com is not an auth origin')
+
+const totpAttempt = auth.createOpenAiAuthAttempt()
+assert.equal(totpAttempt.totpSubmittedCounter, null)
+assert.equal(auth.claimTotpSubmit(totpAttempt, 100), true, 'first TOTP submit')
+assert.equal(auth.claimTotpSubmit(totpAttempt, 100), false, 'same TOTP counter replayed')
+assert.equal(auth.claimTotpSubmit(totpAttempt, 101), true, 'single retry with advanced counter')
+assert.equal(auth.claimTotpSubmit(totpAttempt, 102), false, 'second retry must be blocked')
+EOF
+
+grep -q "allowInteractive: true" "$REPO_ROOT/chatgpt-web/chatgpt-consult.mjs" || fail "login --auto does not enable interactive verification fallback"
+grep -q "interactiveTimeoutSec: 1200" "$REPO_ROOT/chatgpt-web/chatgpt-consult.mjs" || fail "login --auto interactive verification window is not 20 minutes"
+grep -q "interactive: isInteractiveOpenAiChallenge(body, url)" "$REPO_ROOT/chatgpt-web/chatgpt-consult.mjs" || fail "password outcome does not preserve interactive challenge classification"
+grep -q "allowInteractive && settled.interactive" "$REPO_ROOT/chatgpt-web/chatgpt-consult.mjs" || fail "password blocker can still abort before interactive handoff"
+grep -q "await tryAutoTotpSubmit(page, creds, authAttempt)" "$REPO_ROOT/chatgpt-web/chatgpt-consult.mjs" || fail "TOTP autofill hook missing"
+grep -q "totpConfigured" "$REPO_ROOT/chatgpt-web/chatgpt-consult.mjs" || fail "status does not report totpConfigured"
+
+# logout must delete the saved profile without touching .env (no browser needed)
+logout_bridge="$TEST_ROOT/logout-bridge"
+mkdir -p "$logout_bridge/profile/Default"
+printf 'CHATGPT_EMAIL=a@ex.com\nCHATGPT_PASSWORD=x\n' > "$logout_bridge/.env"
+chmod 600 "$logout_bridge/.env"
+printf '{"chats":{}}\n' > "$logout_bridge/chats.json"
+printf '{"projects":{}}\n' > "$logout_bridge/projects.json"
+CODEX_WORK_CHATGPT_DIR="$logout_bridge" node "$REPO_ROOT/chatgpt-web/chatgpt-consult.mjs" logout --clear-all >/dev/null 2>&1 || fail "chatgpt logout --clear-all failed"
+[[ ! -e "$logout_bridge/profile" ]] || fail "logout did not delete profile/"
+[[ ! -e "$logout_bridge/chats.json" ]] || fail "logout --clear-all did not delete chats.json"
+[[ ! -e "$logout_bridge/projects.json" ]] || fail "logout --clear-all did not delete projects.json"
+[[ -f "$logout_bridge/.env" ]] || fail "logout deleted .env credentials"
+if CODEX_WORK_CHATGPT_DIR="$logout_bridge" node "$REPO_ROOT/chatgpt-web/chatgpt-consult.mjs" logout --bogus >/dev/null 2>&1; then
+  fail "logout accepted an unknown option"
+fi
 
 if grep -Eqi 'approval|autoreview|merge|project' "$REPO_ROOT/gemini-web/gemini-consult.mjs"; then
     # Gemini must remain scraper-only, not workflow-coupled — check for approval handling specifically
@@ -262,6 +394,8 @@ HOME="$install_home" CODEX_WORK_BIN_DIR="$install_home/bin" CODEX_WORK_CHATGPT_D
 [[ -f "$install_home/bridge/chatgpt/.env" ]] || fail "chatgpt .env not created by install"
 [[ "$(stat -c '%a' "$install_home/bridge/chatgpt/.env")" == 600 ]] || fail "chatgpt .env not 0600"
 [[ -f "$install_home/bridge/chatgpt/bridge-env.mjs" ]] || fail "bridge-env.mjs not installed (chatgpt)"
+[[ -f "$install_home/bridge/chatgpt/chatgpt-auth-flow.mjs" ]] || fail "chatgpt-auth-flow.mjs not installed (chatgpt)"
+[[ -f "$install_home/bridge/chatgpt/chatgpt-consult.mjs" ]] || fail "chatgpt-consult.mjs not installed (chatgpt)"
 HOME="$install_home" CODEX_WORK_BIN_DIR="$install_home/bin" CODEX_WORK_GEMINI_DIR="$install_home/bridge/gemini" CODEX_WORK_SKIP_NPM_INSTALL=1 bash "$REPO_ROOT/install-gemini-web.sh" >/dev/null 2>&1 || fail "install-gemini-web.sh failed"
 [[ -f "$install_home/bridge/gemini/.env" ]] || fail "gemini .env not created by install"
 [[ "$(stat -c '%a' "$install_home/bridge/gemini/.env")" == 600 ]] || fail "gemini .env not 0600"

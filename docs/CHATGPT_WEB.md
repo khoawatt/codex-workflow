@@ -18,6 +18,9 @@ chatgpt-consult login                    # đăng nhập thủ công 1 lần (x�
 chatgpt-consult login --auto
 chatgpt-consult status          # → {"profileExists":true,"loggedIn":true,"envConfigured":true}
 # Đổi tài khoản:
+chatgpt-consult logout                          # xóa session đã lưu (giữ .env)
+chatgpt-consult logout --clear-chats            # + xóa chats.json của account cũ
+chatgpt-consult logout --clear-all              # + xóa cả projects.json
 chatgpt-consult login --switch              # giữ browser mở, đợi token đổi
 chatgpt-consult login --wait=30             # sau khi login mới, giữ mở 30s để verify
 ```
@@ -31,6 +34,17 @@ LOGIN OPTIONS:
 --timeout=SECONDS     Max seconds chờ auto-login (default 150)
 --headless / --headful       Browser visibility (default headful)
 ```
+
+LOGOUT OPTIONS:
+```text
+--clear-chats         Xóa cả chats.json (thread của account cũ, ID cũ không mở được nữa).
+--clear-all           --clear-chats + xóa projects.json (Project đã attach của account cũ).
+```
+
+`login --auto` giữ browser mở tối đa 20 phút khi gặp mã xác minh/2FA/CAPTCHA để bạn
+nhập tay trong chính cửa sổ đó; `ask` nền thì fail-fast thay vì chờ. Tài khoản bật
+2FA authenticator app có thể full-auto bằng `CHATGPT_TOTP_SECRET` trong `.env`
+(bridge tự sinh mã RFC 6238 ngay trên máy, tối đa 2 mã, không lộ secret).
 
 `ask` tự retry `.env` login khi session hết hạn (unless `--no-auto-login`). Xem `docs/AUTO_LOGIN.md`.
 
@@ -118,7 +132,7 @@ coi lỗi/timeout là một lần review thành công.
 
 ```bash
 bash -n chatgpt-web/chatgpt-consult chatgpt-web/chatgpt-autoreview install-chatgpt-web.sh
-node --check chatgpt-web/chatgpt-consult.mjs
+node --check chatgpt-web/chatgpt-consult.mjs chatgpt-web/chatgpt-auth-flow.mjs chatgpt-web/bridge-env.mjs
 bash tests/test.sh
 command -v chatgpt-consult
 chatgpt-consult status

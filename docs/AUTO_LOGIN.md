@@ -68,20 +68,39 @@ Muốn tắt hành vi này (chỉ dùng session có sẵn): thêm `--no-auto-log
 
 ## 4. Giới hạn (trung thực)
 
-- Tài khoản bật **2FA/OTP/passkey**, hoặc gặp **CAPTCHA / Cloudflare challenge /
-  "browser may not be secure" / "unusual traffic"**, auto-login **không tự qua được**.
+- Tài khoản dùng mã xác minh qua **email**, hoặc gặp **CAPTCHA / Cloudflare challenge /
+  "browser may not be secure" / "unusual traffic"**, auto-login **không tự qua được**
+  (riêng `login --auto` sẽ giữ browser mở tối đa 20 phút để bạn nhập tay; còn `ask`
+  nền thì fail-fast).
   Bridge sẽ báo rõ lý do và hướng fallback: chạy `login` thủ công **1 lần** để lưu
   session vào `profile/` — các lần sau tái dùng session, không cần gõ lại.
 - Google đặc biệt gắt với trình duyệt tự động; nếu `--auto` thất bại với
   "browser may not be secure", bắt buộc login tay 1 lần.
 - Đổi mật khẩu → cập nhật lại `.env`, chạy `login --auto` lại.
-- Đổi account ChatGPT khi đã login: vẫn dùng `login --switch` thủ công.
+- Đổi account ChatGPT khi đã login: `chatgpt-consult logout` (thêm `--clear-chats` /
+  `--clear-all` nếu muốn xóa cả thread/project cũ), rồi `login` hoặc `login --switch` thủ công.
+- Lỗi `Oops, an error occurred / Route Error` ở trang Auth0: bridge tự xóa riêng
+  transaction cookies/storage của OpenAI/Auth0 rồi restart từ `chatgpt.com` (tối đa
+  3 lần). Quá 3 lần thì chạy `chatgpt-consult logout` rồi `chatgpt-consult login`.
 
-## 5. Verify
+## 5. Full-auto với TOTP (authenticator app, chỉ ChatGPT)
+
+Nếu account bật 2FA kiểu authenticator app, thêm secret base32 (lúc enroll 2FA) vào `.env`:
 
 ```bash
-node --check bin/bridge-env.mjs bin/chatgpt-review.mjs bin/gemini-review.mjs
+CHATGPT_TOTP_SECRET=JBSWY3DPEHPK3PXP   # ví dụ — dùng secret của bạn
+chmod 600 ~/.config/codex-work/chatgpt-web/.env
+```
+
+Bridge tự sinh mã 6 số **ngay trên máy** (chuẩn RFC 6238, không gọi dịch vụ ngoài như 2fa.live, secret không rời máy và không bao giờ in ra log) và điền vào màn `mfa-challenge`. Quy tắc an toàn: submit đúng 1 lần, thử lại tối đa 1 lần với cửa sổ giờ mới, không thử lại khi bị rate-limit, hết lượt thì rơi về chờ nhập tay. `status` báo `totpConfigured:true/false` (boolean, không lộ secret).
+
+Tradeoff (trung thực): để TOTP cạnh password trong `.env` thì 2FA còn 1 điểm chứa cả 2 yếu tố — chấp nhận được trên máy cá nhân tin cậy (`chmod 600`, không commit). **Nếu secret từng lộ (ảnh chụp, chat, repo), rotate/re-enroll 2FA ngay.** Gemini không thuộc scope (vẫn nhập tay).
+
+## 6. Verify
+
+```bash
+node --check chatgpt-web/chatgpt-auth-flow.mjs chatgpt-web/bridge-env.mjs chatgpt-web/chatgpt-consult.mjs
 bash tests/test.sh
-chatgpt-consult status  # envConfigured:true, loggedIn:true
+chatgpt-consult status  # envConfigured:true, totpConfigured:true/false, loggedIn:true
 gemini-consult status    # envConfigured:true, loggedIn:true
 ```

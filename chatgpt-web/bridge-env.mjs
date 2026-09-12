@@ -88,17 +88,22 @@ function firstPresent(keys, env, fileVals) {
   return { value: '', key: keys[0] || '', source: 'none' }
 }
 
-// Load { email, password } for one bridge.
+// Load { email, password, totpSecret } for one bridge.
 //   bridgeDir: absolute bridge dir (already resolved via resolveBridgeDir)
 //   envFileVar: e.g. 'CHATGPT_ENV_FILE' — when set, overrides `<bridgeDir>/.env`
 //   emailKeys / passwordKeys: ordered aliases, first hit wins (env > file)
-export function loadBridgeCreds({ bridgeDir, envFileVar, emailKeys, passwordKeys }) {
+//   totpKeys: optional ordered aliases for a TOTP 2FA secret (env > file).
+//     Absent/empty when unconfigured — never required, never printed.
+export function loadBridgeCreds({ bridgeDir, envFileVar, emailKeys, passwordKeys, totpKeys = [] }) {
   const customPath = envFileVar ? (process.env[envFileVar] || '').trim() : ''
   const envPath = customPath || join(bridgeDir, '.env')
   const fileExists = existsSync(envPath)
   const fileVals = loadDotEnvFile(envPath)
   const email = firstPresent(emailKeys, process.env, fileVals)
   const password = firstPresent(passwordKeys, process.env, fileVals)
+  const totp = Array.isArray(totpKeys) && totpKeys.length
+    ? firstPresent(totpKeys, process.env, fileVals)
+    : { value: '', key: '', source: 'none' }
 
   const missing = []
   if (!email.value) missing.push(emailKeys[0])
@@ -117,6 +122,8 @@ export function loadBridgeCreds({ bridgeDir, envFileVar, emailKeys, passwordKeys
   return {
     email: email.value,
     password: password.value,
+    totpSecret: totp.value,
+    totpConfigured: !!totp.value,
     emailKey: email.key,
     passwordKey: password.key,
     emailSource: email.source,
@@ -150,6 +157,7 @@ export function credsHelp({ bridgeLabel, envPath, emailKeys, passwordKeys, examp
 export const CHATGPT_KEYS = {
   emailKeys: ['CHATGPT_EMAIL', 'OPENAI_EMAIL', 'CHATGPT_USERNAME'],
   passwordKeys: ['CHATGPT_PASSWORD', 'OPENAI_PASSWORD'],
+  totpKeys: ['CHATGPT_TOTP_SECRET', 'OPENAI_TOTP_SECRET'],
 }
 
 export const GEMINI_KEYS = {
