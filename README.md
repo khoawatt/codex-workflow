@@ -90,6 +90,7 @@ project khác dùng layout `tiled`.
 - [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md): thêm, bỏ hoặc đổi project.
 - [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md): lỗi thường gặp và rollback.
 - [`docs/CHATGPT_WEB.md`](docs/CHATGPT_WEB.md): browser bridge và auto-consult.
+- [`docs/IMAGE_GENERATION.md`](docs/IMAGE_GENERATION.md): gen 1–N ảnh qua ChatGPT Web, chạy nền.
 - [`docs/WORKFLOW.md`](docs/WORKFLOW.md): verdict, approval, project installer và merge guard.
 - [`docs/GEMINI_WEB.md`](docs/GEMINI_WEB.md): Gemini scraper-only bridge.
 - [`AGENTS.md`](AGENTS.md): runbook cho AI agent tự cài và xác minh môi trường.
