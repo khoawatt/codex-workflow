@@ -77,6 +77,7 @@ const stopSelector = [
   'button[aria-label*="Stop"]',
 ].join(', ')
 const assistantSelector = '[data-message-author-role="assistant"]'
+const assistantCopySelector = 'button[aria-label="Copy"]'
 const newProjectSelectors = ['button[aria-label="New project"]']
 const projectNameSelector = '#project-name, input[name="projectName"]'
 const createProjectSelectors = [
@@ -933,14 +934,33 @@ async function send(page, prompt) {
   await composer.press('Enter')
 }
 
-async function reply(page, timeoutSeconds, previousCount) {
+async function responseTextFromCopyButton(button) {
+  return button.evaluate((copyButton) => {
+    for (let node = copyButton.parentElement; node && node !== document.body; node = node.parentElement) {
+      const hasPromptCopy = node.querySelector('button[aria-label="Copy message"]')
+      const markdown = [...node.querySelectorAll('[class*="MarkdownRoot"]')]
+      if (hasPromptCopy && markdown.length > 0) {
+        return (markdown.at(-1).innerText || '').trim()
+      }
+    }
+    return ''
+  })
+}
+
+async function reply(page, timeoutSeconds, previousCounts) {
   const deadline = Date.now() + timeoutSeconds * 1000
   while (Date.now() < deadline) {
     if ((await page.locator(stopSelector).count()) === 0) {
       const messages = page.locator(assistantSelector)
       const count = await messages.count()
-      if (count > previousCount) {
+      if (count > previousCounts.messages) {
         const text = (await messages.nth(count - 1).innerText()).trim()
+        if (text.length > 0) return text
+      }
+      const copyButtons = page.locator(assistantCopySelector)
+      const copyCount = await copyButtons.count()
+      if (copyCount > previousCounts.copyButtons) {
+        const text = await responseTextFromCopyButton(copyButtons.nth(copyCount - 1))
         if (text.length > 0) return text
       }
     }
@@ -1241,9 +1261,12 @@ async function ask() {
         await page.goto(chatUrl, { waitUntil: 'domcontentloaded', timeout: 60000 })
       }
     }
-    const previousCount = await page.locator(assistantSelector).count()
+    const previousCounts = {
+      messages: await page.locator(assistantSelector).count(),
+      copyButtons: await page.locator(assistantCopySelector).count(),
+    }
     await send(page, prompt)
-    const response = await reply(page, timeoutSeconds, previousCount)
+    const response = await reply(page, timeoutSeconds, previousCounts)
     const now = Date.now()
     const id = chatId(page.url())
     if (id) {

@@ -149,6 +149,9 @@ grep -q "interactive: isInteractiveOpenAiChallenge(body, url)" "$REPO_ROOT/chatg
 grep -q "allowInteractive && settled.interactive" "$REPO_ROOT/chatgpt-web/chatgpt-consult.mjs" || fail "password blocker can still abort before interactive handoff"
 grep -q "await tryAutoTotpSubmit(page, creds, authAttempt)" "$REPO_ROOT/chatgpt-web/chatgpt-consult.mjs" || fail "TOTP autofill hook missing"
 grep -q "totpConfigured" "$REPO_ROOT/chatgpt-web/chatgpt-consult.mjs" || fail "status does not report totpConfigured"
+grep -Fq "const assistantCopySelector = 'button[aria-label=\"Copy\"]'" "$REPO_ROOT/chatgpt-web/chatgpt-consult.mjs" || fail "ChatGPT reply fallback is missing the assistant Copy action selector"
+grep -q 'copyButtons: await page.locator(assistantCopySelector).count()' "$REPO_ROOT/chatgpt-web/chatgpt-consult.mjs" || fail "ChatGPT reply fallback does not capture the pre-send action count"
+grep -q 'responseTextFromCopyButton(copyButtons.nth(copyCount - 1))' "$REPO_ROOT/chatgpt-web/chatgpt-consult.mjs" || fail "ChatGPT reply fallback does not extract the newest accessible response"
 
 # logout must delete the saved profile without touching .env (no browser needed)
 logout_bridge="$TEST_ROOT/logout-bridge"
