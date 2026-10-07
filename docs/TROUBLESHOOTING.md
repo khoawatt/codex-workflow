@@ -18,6 +18,7 @@
 | Bridge không tìm thấy prompt input | ChatGPT Web có thể đã đổi UI; cập nhật bridge, không coi lần consult là thành công. Thử `chatgpt-consult status` headful (mới port) để debug `url/title/loggedIn`. |
 | Chromium báo thiếu `libnspr4.so`/`libnss3.so` | Chạy lại `bash install-chatgpt-web.sh`; installer extract browser libraries vào bridge mà không cần sudo (port thêm probe `chromium.executablePath()` + `ldd` + `sudo` fallback). |
 | Codex không tự consult | Kiểm tra cảnh báo `AGENTS.override.md`, rồi restart Codex để nạp lại global instructions. |
+| `chatgpt-consult` báo `EROFS` khi tạo `.lock` | Đây là sandbox write-boundary mismatch, không phải bằng chứng bị logout. Chạy lại đúng một invocation `chatgpt-consult` bằng native execution với quyền tối thiểu; không mở rộng quyền ghi lâu dài cho browser profile. Chỉ tính consultation thành công khi `ask` không có bridge/execution error và trả nội dung tư vấn hữu dụng, không rỗng. |
 | Bridge đang bị lock | Chờ lần consult hiện tại xong; lock của PID đã chết sẽ tự được dọn (`kill(pid,0)` + `Atomics.wait`). Kiểm tra `cat ~/.config/codex-work/chatgpt-web/.lock`. |
 | Auto-review đổi trạng thái nhưng session cũ không làm theo | Cài lại managed block rồi restart Codex session đó. |
 | Approval không khớp HEAD/PR/repo | Không merge; `chatgpt-consult approval get` so sánh `head_sha` 40-char + `pr` + repo case-insensitive, clear approval, review lại exact HEAD rồi `approval set approve <sha> <pr>`. |

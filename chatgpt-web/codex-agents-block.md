@@ -40,4 +40,14 @@ human may authorize merges, deployments, destructive actions, or other guarded
 mutations. For trivial self-contained requests, skip consultation. If the
 bridge is unavailable, report that briefly and continue when safe; never claim
 that a consultation succeeded when it did not.
+
+Treat authentication status, command completion, and end-to-end consultation
+success as separate results. A consultation succeeds only when the authenticated
+`ask` completes without a bridge or execution error and returns non-empty,
+usable advisory content. If creating the bridge lockfile fails with `EROFS`,
+retry that single `chatgpt-consult` invocation once with the minimum native
+execution required; do not grant, modify, or broaden persistent write access to
+the browser profile or other browser state. Before changing or removing a lock,
+verify that its recorded PID belongs to the relevant live bridge process; never
+delete a lock merely because it blocks startup.
 <!-- codex-work:chatgpt-web:end -->

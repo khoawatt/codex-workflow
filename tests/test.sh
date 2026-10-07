@@ -250,6 +250,8 @@ grep -Fq '# existing global guidance' "$chatgpt_codex/AGENTS.md" ||
     fail "existing global Codex instructions were not preserved"
 [[ "$(grep -Fc '<!-- codex-work:chatgpt-web:start -->' "$chatgpt_codex/AGENTS.md")" -eq 1 ]] ||
     fail "managed global instruction block was not installed exactly once"
+grep -Fq 'retry that single `chatgpt-consult` invocation once' "$chatgpt_codex/AGENTS.md" ||
+    fail "native EROFS recovery guidance was not installed"
 compgen -G "$chatgpt_codex/AGENTS.md.backup.*" >/dev/null ||
     fail "existing global instructions were not backed up"
 
